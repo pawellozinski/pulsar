@@ -19,7 +19,6 @@
 package org.apache.pulsar.client.impl;
 
 import com.google.common.collect.Sets;
-
 import io.netty.buffer.ByteBuf;
 
 import java.util.ArrayList;
@@ -32,9 +31,8 @@ import java.util.concurrent.CancellationException;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
-
 import org.apache.bookkeeper.mledger.ManagedLedger;
-import org.apache.commons.lang3.tuple.ImmutablePair;
+import org.apache.commons.lang3.tuple.ImmutableTriple;
 import org.apache.pulsar.broker.auth.MockedPulsarServiceBaseTest;
 import org.apache.pulsar.broker.service.persistent.PersistentTopic;
 import org.apache.pulsar.client.api.MessageId;
@@ -43,16 +41,18 @@ import org.apache.pulsar.client.api.Producer;
 import org.apache.pulsar.client.api.RawMessage;
 import org.apache.pulsar.client.api.RawReader;
 import org.apache.pulsar.common.protocol.Commands;
-import org.apache.pulsar.common.api.proto.PulsarApi.MessageMetadata;
+import org.apache.pulsar.common.api.proto.MessageMetadata;
 import org.apache.pulsar.common.policies.data.ClusterData;
 import org.apache.pulsar.common.policies.data.TenantInfo;
+import org.awaitility.Awaitility;
 import org.testng.Assert;
 import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
+@Test(groups = "flaky")
 public class RawReaderTest extends MockedPulsarServiceBaseTest {
-    private static final int BATCH_MAX_MESSAGES = 10;
+
     private static final String subscription = "foobar-sub";
 
     @BeforeMethod
@@ -67,7 +67,7 @@ public class RawReaderTest extends MockedPulsarServiceBaseTest {
         admin.namespaces().createNamespace("my-property/my-ns", Sets.newHashSet("test"));
     }
 
-    @AfterMethod
+    @AfterMethod(alwaysRun = true)
     @Override
     public void cleanup() throws Exception {
         super.internalCleanup();
@@ -100,7 +100,7 @@ public class RawReaderTest extends MockedPulsarServiceBaseTest {
         return keys;
     }
 
-    public static String extractKey(RawMessage m) throws Exception {
+    public static String extractKey(RawMessage m) {
         ByteBuf headersAndPayload = m.getHeadersAndPayload();
         MessageMetadata msgMetadata = Commands.parseMessageMetadata(headersAndPayload);
         return msgMetadata.getPartitionKey();
@@ -252,10 +252,10 @@ public class RawReaderTest extends MockedPulsarServiceBaseTest {
         while (true) {
             try (RawMessage m = reader.readNextAsync().get(1, TimeUnit.SECONDS)) {
                 Assert.assertTrue(RawBatchConverter.isReadableBatch(m));
-                List<ImmutablePair<MessageId, String>> batchKeys = RawBatchConverter.extractIdsAndKeys(m);
+                List<ImmutableTriple<MessageId, String, Integer>> batchKeys = RawBatchConverter.extractIdsAndKeysAndSize(m);
                 // Assert each key is unique
-                for (ImmutablePair<MessageId, String> pair : batchKeys) {
-                    String key = pair.right;
+                for (ImmutableTriple<MessageId, String, Integer> pair : batchKeys) {
+                    String key = pair.middle;
                     Assert.assertTrue(
                             keys.add(key),
                             "Received duplicated key '" + key + "' : already received keys = " + keys);
@@ -285,7 +285,7 @@ public class RawReaderTest extends MockedPulsarServiceBaseTest {
 
         RawReader reader = RawReader.create(pulsarClient, topic, subscription).get();
         try (RawMessage m = reader.readNextAsync().get()) {
-            List<ImmutablePair<MessageId,String>> idsAndKeys = RawBatchConverter.extractIdsAndKeys(m);
+            List<ImmutableTriple<MessageId, String, Integer>> idsAndKeys = RawBatchConverter.extractIdsAndKeysAndSize(m);
 
             Assert.assertEquals(idsAndKeys.size(), 3);
 
@@ -294,9 +294,9 @@ public class RawReaderTest extends MockedPulsarServiceBaseTest {
             Assert.assertTrue(idsAndKeys.get(1).getLeft().compareTo(idsAndKeys.get(2).getLeft()) < 0);
 
             // assert keys are as expected
-            Assert.assertEquals(idsAndKeys.get(0).getRight(), "key1");
-            Assert.assertEquals(idsAndKeys.get(1).getRight(), "key2");
-            Assert.assertEquals(idsAndKeys.get(2).getRight(), "key3");
+            Assert.assertEquals(idsAndKeys.get(0).getMiddle(), "key1");
+            Assert.assertEquals(idsAndKeys.get(1).getMiddle(), "key2");
+            Assert.assertEquals(idsAndKeys.get(2).getMiddle(), "key3");
         } finally {
             reader.closeAsync().get();
         }
@@ -319,13 +319,13 @@ public class RawReaderTest extends MockedPulsarServiceBaseTest {
         }
 
         RawReader reader = RawReader.create(pulsarClient, topic, subscription).get();
-        try {
-            RawMessage m1 = reader.readNextAsync().get();
+        try (RawMessage m1 = reader.readNextAsync().get()) {
             RawMessage m2 = RawBatchConverter.rebatchMessage(m1, (key, id) -> key.equals("key2")).get();
-            List<ImmutablePair<MessageId,String>> idsAndKeys = RawBatchConverter.extractIdsAndKeys(m2);
+            List<ImmutableTriple<MessageId, String, Integer>> idsAndKeys = RawBatchConverter.extractIdsAndKeysAndSize(m2);
             Assert.assertEquals(idsAndKeys.size(), 1);
-            Assert.assertEquals(idsAndKeys.get(0).getRight(), "key2");
+            Assert.assertEquals(idsAndKeys.get(0).getMiddle(), "key2");
             m2.close();
+            Assert.assertEquals(m1.getHeadersAndPayload().refCnt(), 1);
         } finally {
             reader.closeAsync().get();
         }
@@ -359,14 +359,14 @@ public class RawReaderTest extends MockedPulsarServiceBaseTest {
 
         PersistentTopic topicRef = (PersistentTopic) pulsar.getBrokerService().getTopicReference(topic).get();
         ManagedLedger ledger = topicRef.getManagedLedger();
-        for (int i = 0; i < 30; i++) {
-            if (ledger.openCursor(subscription).getProperties().get("foobar") == Long.valueOf(0xdeadbeefdecaL)) {
-                break;
-            }
-            Thread.sleep(100);
-        }
-        Assert.assertEquals(ledger.openCursor(subscription).getProperties().get("foobar"),
-                Long.valueOf(0xdeadbeefdecaL));
+
+        Awaitility.await()
+                .atMost(5, TimeUnit.SECONDS)
+                .untilAsserted(() ->
+                        Assert.assertEquals(
+                                ledger.openCursor(subscription).getProperties().get("foobar"),
+                                Long.valueOf(0xdeadbeefdecaL)));
+
     }
 
     @Test

@@ -39,6 +39,12 @@ public class RabbitMQSourceConfig extends RabbitMQAbstractConfig implements Seri
     private static final long serialVersionUID = 1L;
 
     @FieldDoc(
+        required = true,
+        defaultValue = "",
+        help = "The RabbitMQ queue name from which messages should be read from or written to")
+    private String queueName;
+
+    @FieldDoc(
         required = false,
         defaultValue = "0",
         help = "Maximum number of messages that the server will deliver, 0 for unlimited")
@@ -49,6 +55,12 @@ public class RabbitMQSourceConfig extends RabbitMQAbstractConfig implements Seri
         defaultValue = "false",
         help = "Set true if the settings should be applied to the entire channel rather than each consumer")
     private boolean prefetchGlobal = false;
+
+    @FieldDoc(
+            required=false,
+            defaultValue = "false",
+            help = "Set true if the queue should be declared passively - ie to preserve durability/timeout settings")
+    private boolean passive = false;
 
     public static RabbitMQSourceConfig load(String yamlFile) throws IOException {
         ObjectMapper mapper = new ObjectMapper(new YAMLFactory());
@@ -63,6 +75,7 @@ public class RabbitMQSourceConfig extends RabbitMQAbstractConfig implements Seri
     @Override
     public void validate() {
         super.validate();
+        Preconditions.checkNotNull(queueName, "queueName property not set.");
         Preconditions.checkArgument(prefetchCount >= 0, "prefetchCount must be non-negative.");
     }
 }

@@ -19,6 +19,7 @@
 package org.apache.pulsar.functions.instance;
 
 import lombok.Data;
+import lombok.Getter;
 import org.apache.pulsar.functions.proto.Function;
 import org.apache.pulsar.functions.proto.Function.FunctionDetails;
 
@@ -36,6 +37,13 @@ public class InstanceConfig {
     private Function.FunctionAuthenticationSpec functionAuthenticationSpec;
     private int port;
     private String clusterName;
+    // Max pending async requests per instance to avoid large number of concurrent requests.
+    // Only used in AsyncFunction. Default: 1000
+    private int maxPendingAsyncRequests = 1000;
+    // Whether the pulsar admin client exposed to function context, default is disabled.
+    @Getter
+    private boolean exposePulsarAdminClientEnabled = false;
+    private int metricsPort;
 
     /**
      * Get the string representation of {@link #getInstanceId()}.
@@ -44,5 +52,13 @@ public class InstanceConfig {
      */
     public String getInstanceName() {
         return "" + instanceId;
+    }
+
+    public FunctionDetails getFunctionDetails() {
+        return functionDetails;
+    }
+
+    public boolean hasValidMetricsPort() {
+        return metricsPort > 0 && metricsPort < 65536;
     }
 }

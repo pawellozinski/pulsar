@@ -33,20 +33,19 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import org.apache.pulsar.client.impl.ConsumerBase;
 import org.apache.pulsar.client.impl.ProducerBase;
-import org.apache.pulsar.common.api.proto.PulsarApi.CommandLookupTopicResponse.LookupType;
-import org.apache.pulsar.common.api.proto.PulsarApi.ServerError;
+import org.apache.pulsar.common.api.proto.CommandLookupTopicResponse.LookupType;
+import org.apache.pulsar.common.api.proto.ServerError;
 import org.apache.pulsar.common.protocol.Commands;
 import org.apache.pulsar.common.protocol.schema.SchemaVersion;
 import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
-/**
- */
+@Test(groups = "broker-api")
 public class ClientErrorsTest {
 
     MockBrokerService mockBrokerService;
-    private static int ASYNC_EVENT_COMPLETION_WAIT = 100;
+    private static final int ASYNC_EVENT_COMPLETION_WAIT = 100;
 
     private final String ASSERTION_ERROR = "AssertionError";
 
@@ -56,13 +55,13 @@ public class ClientErrorsTest {
         mockBrokerService.start();
     }
 
-    @AfterClass
+    @AfterClass(alwaysRun = true, groups = "broker-api")
     public void teardown() {
         mockBrokerService.stop();
     }
 
     @Test
-    public void testMockBrokerService() throws Exception {
+    public void testMockBrokerService() {
         // test default actions of mock broker service
         try {
             PulsarClient client = PulsarClient.builder().serviceUrl(mockBrokerService.getBrokerAddress()).build();
@@ -208,7 +207,7 @@ public class ClientErrorsTest {
         mockBrokerService.setHandleProducer((ctx, producer) -> {
             if (counter.incrementAndGet() == 2) {
                 // fail second producer
-                ctx.writeAndFlush(Commands.newError(producer.getRequestId(), ServerError.AuthenticationError, "msg"));
+                ctx.writeAndFlush(Commands.newError(producer.getRequestId(), ServerError.AuthorizationError, "msg"));
                 return;
             }
             ctx.writeAndFlush(Commands.newProducerSuccess(producer.getRequestId(), "default-producer", SchemaVersion.Empty));
@@ -436,7 +435,7 @@ public class ClientErrorsTest {
         mockBrokerService.setHandleSubscribe((ctx, subscribe) -> {
             if (counter.incrementAndGet() == 2) {
                 // fail second producer
-                ctx.writeAndFlush(Commands.newError(subscribe.getRequestId(), ServerError.AuthenticationError, "msg"));
+                ctx.writeAndFlush(Commands.newError(subscribe.getRequestId(), ServerError.AuthorizationError, "msg"));
                 return;
             }
             ctx.writeAndFlush(Commands.newSuccess(subscribe.getRequestId()));
@@ -507,7 +506,7 @@ public class ClientErrorsTest {
         mockBrokerService.setHandleSubscribe((ctx, subscribe) -> {
             System.err.println("subscribeCounter: " + subscribeCounter.get());
             if (subscribeCounter.incrementAndGet() == 3) {
-                ctx.writeAndFlush(Commands.newError(subscribe.getRequestId(), ServerError.AuthenticationError, "msg"));
+                ctx.writeAndFlush(Commands.newError(subscribe.getRequestId(), ServerError.AuthorizationError, "msg"));
                 return;
             }
             ctx.writeAndFlush(Commands.newSuccess(subscribe.getRequestId()));
@@ -520,8 +519,8 @@ public class ClientErrorsTest {
 
         try {
             client.newConsumer().topic("persistent://prop/use/ns/multi-part-t1").subscriptionName("sub1").subscribe();
-            fail("Should have failed with an authentication error");
-        } catch (PulsarClientException.AuthenticationException e) {
+            fail("Should have failed with an authorization error");
+        } catch (PulsarClientException.AuthorizationException e) {
         }
 
         // should call close for 3 partitions
@@ -563,7 +562,7 @@ public class ClientErrorsTest {
     }
 
     // Run this test multiple times to reproduce race conditions on reconnection logic
-    @Test(invocationCount = 10)
+    @Test(invocationCount = 10, groups = "broker-api")
     public void testProducerReconnect() throws Exception {
         AtomicInteger numOfConnections = new AtomicInteger();
         AtomicReference<ChannelHandlerContext> channelCtx = new AtomicReference<>();

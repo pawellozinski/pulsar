@@ -26,14 +26,18 @@ import org.apache.pulsar.client.api.ProducerConsumerBase;
 import org.apache.pulsar.client.api.PulsarClientException;
 import org.apache.pulsar.client.api.SubscriptionType;
 import org.apache.pulsar.common.policies.data.TopicStats;
+import org.apache.pulsar.broker.service.persistent.PersistentTopic;
+import org.apache.pulsar.common.policies.data.ConsumerStats;
 import org.testng.Assert;
 import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 @Slf4j
+@Test(groups = "broker")
 public class ConsumerStatsTest extends ProducerConsumerBase {
 
     @BeforeMethod
@@ -44,7 +48,7 @@ public class ConsumerStatsTest extends ProducerConsumerBase {
         super.producerBaseSetup();
     }
 
-    @AfterMethod
+    @AfterMethod(alwaysRun = true)
     @Override
     protected void cleanup() throws Exception {
         super.internalCleanup();
@@ -103,4 +107,65 @@ public class ConsumerStatsTest extends ProducerConsumerBase {
         Assert.assertEquals(stats.subscriptions.entrySet().iterator().next().getValue().consumers.get(0).unackedMessages, 0);
     }
 
+    @Test
+    public void testAckStatsOnPartitionedTopicForExclusiveSubscription() throws PulsarAdminException, PulsarClientException, InterruptedException {
+        final String topic = "persistent://my-property/my-ns/testAckStatsOnPartitionedTopicForExclusiveSubscription";
+        admin.topics().createPartitionedTopic(topic, 3);
+        Consumer<byte[]> consumer = pulsarClient.newConsumer()
+                .topic(topic)
+                .subscriptionType(SubscriptionType.Exclusive)
+                .subscriptionName("sub")
+                .subscribe();
+
+        Producer<byte[]> producer = pulsarClient.newProducer()
+                .topic(topic)
+                .create();
+
+        final int messages = 10;
+        for (int i = 0; i < messages; i++) {
+            producer.send(("message-" + i).getBytes());
+        }
+
+        int received = 0;
+        for (int i = 0; i < messages; i++) {
+            consumer.acknowledge(consumer.receive());
+            received++;
+        }
+        Assert.assertEquals(messages, received);
+
+        // wait acknowledge send
+        Thread.sleep(2000);
+
+        for (int i = 0; i < 3; i++) {
+            TopicStats stats = admin.topics().getStats(topic + "-partition-" + i);
+            Assert.assertEquals(stats.subscriptions.size(), 1);
+            Assert.assertEquals(stats.subscriptions.entrySet().iterator().next().getValue().consumers.size(), 1);
+            Assert.assertEquals(stats.subscriptions.entrySet().iterator().next().getValue().consumers.get(0).unackedMessages, 0);
+        }
+    }
+
+    @Test
+    public void testUpdateStatsForActiveConsumerAndSubscription() throws Exception {
+        final String topicName = "persistent://prop/use/ns-abc/testUpdateStatsForActiveConsumerAndSubscription";
+        pulsarClient.newConsumer()
+                .topic(topicName)
+                .subscriptionType(SubscriptionType.Shared)
+                .subscriptionName("my-subscription")
+                .subscribe();
+
+        PersistentTopic topicRef = (PersistentTopic) pulsar.getBrokerService().getTopicReference(topicName).get();
+        Assert.assertNotNull(topicRef);
+        Assert.assertEquals(topicRef.getSubscriptions().size(), 1);
+        List<org.apache.pulsar.broker.service.Consumer> consumers = topicRef.getSubscriptions()
+                .get("my-subscription").getConsumers();
+        Assert.assertEquals(consumers.size(), 1);
+        ConsumerStats consumerStats = new ConsumerStats();
+        consumerStats.msgOutCounter = 10;
+        consumerStats.bytesOutCounter = 1280;
+        consumers.get(0).updateStats(consumerStats);
+        ConsumerStats updatedStats = consumers.get(0).getStats();
+
+        Assert.assertEquals(updatedStats.msgOutCounter, 10);
+        Assert.assertEquals(updatedStats.bytesOutCounter, 1280);
+    }
 }

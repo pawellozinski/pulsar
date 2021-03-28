@@ -49,18 +49,19 @@ import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
+@Test(groups = "flaky")
 public class MessageDispatchThrottlingTest extends ProducerConsumerBase {
     private static final Logger log = LoggerFactory.getLogger(MessageDispatchThrottlingTest.class);
 
     @BeforeMethod
     @Override
     protected void setup() throws Exception {
+        this.conf.setClusterName("test");
         super.internalSetup();
         super.producerBaseSetup();
-        this.conf.setClusterName("test");
     }
 
-    @AfterMethod
+    @AfterMethod(alwaysRun = true)
     @Override
     protected void cleanup() throws Exception {
         super.internalCleanup();
@@ -79,7 +80,7 @@ public class MessageDispatchThrottlingTest extends ProducerConsumerBase {
 
     @DataProvider(name = "subscriptionAndDispatchRateType")
     public Object[][] subDisTypeProvider() {
-        List<Object[]> mergeList = new LinkedList<Object[]>();
+        List<Object[]> mergeList = new LinkedList<>();
         for (Object[] sub : subscriptionsProvider()) {
             for (Object[] dispatch : dispatchRateProvider()) {
                 mergeList.add(merge(sub, dispatch));
@@ -243,11 +244,9 @@ public class MessageDispatchThrottlingTest extends ProducerConsumerBase {
     /**
      * It verifies that dispatch-rate throttling with cluster-configuration
      *
-     * @param subscription
-     * @param dispatchRateType
      * @throws Exception
      */
-    @Test()
+    @Test
     public void testClusterMsgByteRateLimitingClusterConfig() throws Exception {
         log.info("-- Starting {} test --", methodName);
 
@@ -984,7 +983,7 @@ public class MessageDispatchThrottlingTest extends ProducerConsumerBase {
 
     /**
      * It verifies that relative throttling at least dispatch messages as publish-rate.
-     * 
+     *
      * @param subscription
      * @throws Exception
      */
@@ -1041,13 +1040,28 @@ public class MessageDispatchThrottlingTest extends ProducerConsumerBase {
         int totalReceived = 0;
         // Relative throttling will let it drain immediately because it allows to dispatch = (publish-rate +
         // dispatch-rate)
+        // All messages should be received in the next 1.1 seconds. 100 millis should be enough for the actual delivery,
+        // while the previous call to receive above may have thrown the dispatcher into a read backoff, as nothing
+        // may have been produced before the call to readNext() and the permits for dispatch had already been used.
+        // The backoff is 1 second, so we expect to be able to receive all messages in at most 1.1 seconds, while the
+        // basic dispatch rate limit would only allow one message in that time.
+        long maxTimeNanos = TimeUnit.MILLISECONDS.toNanos(1100);
+        long startNanos = System.nanoTime();
         for (int i = 0; i < numProducedMessages; i++) {
-            Message<byte[]> msg = consumer.receive();
+            Message<byte[]> msg = consumer.receive((int)maxTimeNanos, TimeUnit.NANOSECONDS);
             totalReceived++;
             assertNotNull(msg);
+            long elapsedNanos = System.nanoTime() - startNanos;
+            if (elapsedNanos > maxTimeNanos) { // fail fast
+                log.info("Test has only received {} messages in {}ms, {} expected",
+                         totalReceived, TimeUnit.NANOSECONDS.toMillis(elapsedNanos), numProducedMessages);
+                Assert.fail("Messages not received in time");
+            }
+            log.info("Received {}-{}", msg.getMessageId(), new String(msg.getData()));
         }
-
         Assert.assertEquals(totalReceived, numProducedMessages);
+        long elapsedNanos = System.nanoTime() - startNanos;
+        Assert.assertTrue(elapsedNanos < maxTimeNanos);
 
         consumer.close();
         producer.close();

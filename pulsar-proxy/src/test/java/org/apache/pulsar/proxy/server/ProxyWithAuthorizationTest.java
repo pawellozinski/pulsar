@@ -73,11 +73,14 @@ public class ProxyWithAuthorizationTest extends ProducerConsumerBase {
     private final String TLS_SUPERUSER_CLIENT_TRUST_CERT_FILE_PATH = "./src/test/resources/authentication/tls/cacert.pem";
 
     private ProxyService proxyService;
-    private ProxyConfiguration proxyConfig = new ProxyConfiguration();
+    private final ProxyConfiguration proxyConfig = new ProxyConfiguration();
 
     @DataProvider(name = "hostnameVerification")
     public Object[][] hostnameVerificationCodecProvider() {
-        return new Object[][] { { Boolean.TRUE }, { Boolean.FALSE } };
+        return new Object[][] {
+            { Boolean.TRUE },
+            { Boolean.FALSE }
+        };
     }
 
     @DataProvider(name = "protocolsCiphersProvider")
@@ -129,10 +132,16 @@ public class ProxyWithAuthorizationTest extends ProducerConsumerBase {
         ciphers_8.add("TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256");
         ciphers_8.add("TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384");
 
-        return new Object[][] { { ciphers_1, protocols_1, Boolean.FALSE }, { ciphers_2, protocols_2, Boolean.FALSE },
-                { ciphers_3, protocols_3, Boolean.TRUE }, { ciphers_4, protocols_4, Boolean.TRUE },
-                { ciphers_5, protocols_5, Boolean.TRUE }, { ciphers_6, protocols_6, Boolean.FALSE },
-                { ciphers_7, protocols_7, Boolean.FALSE }, { ciphers_8, protocols_8, Boolean.FALSE } };
+        return new Object[][] {
+            { ciphers_1, protocols_1, Boolean.FALSE },
+            { ciphers_2, protocols_2, Boolean.FALSE },
+            { ciphers_3, protocols_3, Boolean.TRUE },
+            { ciphers_4, protocols_4, Boolean.TRUE },
+            { ciphers_5, protocols_5, Boolean.TRUE },
+            { ciphers_6, protocols_6, Boolean.FALSE },
+            { ciphers_7, protocols_7, Boolean.FALSE },
+            { ciphers_8, protocols_8, Boolean.FALSE }
+        };
     }
 
     @BeforeMethod
@@ -163,6 +172,7 @@ public class ProxyWithAuthorizationTest extends ProducerConsumerBase {
         conf.setAuthenticationProviders(providers);
 
         conf.setClusterName("proxy-authorization");
+        conf.setNumExecutorThreadPoolSize(5);
 
         super.init();
 
@@ -193,14 +203,14 @@ public class ProxyWithAuthorizationTest extends ProducerConsumerBase {
                                                    PulsarConfigurationLoader.convertFrom(proxyConfig))));
     }
 
-    @AfterMethod
+    @AfterMethod(alwaysRun = true)
     @Override
     protected void cleanup() throws Exception {
         super.internalCleanup();
         proxyService.close();
     }
 
-    void startProxy() throws Exception {
+    private void startProxy() throws Exception {
         proxyService.start();
     }
 
@@ -448,7 +458,7 @@ public class ProxyWithAuthorizationTest extends ProducerConsumerBase {
         log.info("-- Exiting {} test --", methodName);
     }
 
-    protected final void createAdminClient() throws Exception {
+    private void createAdminClient() throws Exception {
         Map<String, String> authParams = Maps.newHashMap();
         authParams.put("tlsCertFile", TLS_SUPERUSER_CLIENT_CERT_FILE_PATH);
         authParams.put("tlsKeyFile", TLS_SUPERUSER_CLIENT_KEY_FILE_PATH);

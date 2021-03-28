@@ -22,13 +22,16 @@ package pf
 import (
 	"context"
 	"math"
+	"strconv"
 	"time"
 
 	"github.com/golang/protobuf/ptypes/empty"
 
 	"github.com/apache/pulsar-client-go/pulsar"
+
 	log "github.com/apache/pulsar/pulsar-function-go/logutil"
 	pb "github.com/apache/pulsar/pulsar-function-go/pb"
+	prometheus_client "github.com/prometheus/client_model/go"
 )
 
 type goInstance struct {
@@ -39,6 +42,21 @@ type goInstance struct {
 	client            pulsar.Client
 	lastHealthCheckTs int64
 	properties        map[string]string
+	stats             StatWithLabelValues
+}
+
+func (gi *goInstance) getMetricsLabels() []string {
+	// e.g. metrics_labels = []string{"test-tenant","test-tenant/test-namespace", "test-name", "1234", "test-cluster",
+	//	"test-tenant/test-namespace/test-name"}
+	metricsLabels := []string{
+		gi.context.GetFuncTenant(),
+		gi.context.GetTenantAndNamespace(),
+		gi.context.GetFuncName(),
+		gi.context.GetFuncID(),
+		gi.context.GetClusterName(),
+		gi.context.GetTenantAndNamespaceAndName(),
+	}
+	return metricsLabels
 }
 
 // newGoInstance init goInstance and init function context
@@ -48,8 +66,18 @@ func newGoInstance() *goInstance {
 		consumers: make(map[string]pulsar.Consumer),
 	}
 	now := time.Now()
+
+	goInstance.context.outputMessage = func(topic string) pulsar.Producer {
+		producer, err := goInstance.getProducer(topic)
+		if err != nil {
+			log.Fatal(err)
+		}
+		return producer
+	}
+
 	goInstance.lastHealthCheckTs = now.UnixNano()
 	goInstance.properties = make(map[string]string)
+	goInstance.stats = NewStatWithLabelValues(goInstance.getMetricsLabels()...)
 	return goInstance
 }
 
@@ -116,6 +144,9 @@ func (gi *goInstance) startFunction(function function) error {
 	servicer := InstanceControlServicer{goInstance: gi}
 	servicer.serve(gi)
 
+	metricsServicer := NewMetricsServicer(gi)
+	metricsServicer.serve()
+	defer metricsServicer.close()
 CLOSE:
 	for {
 		idleTimer.Reset(idleDuration)
@@ -128,8 +159,11 @@ CLOSE:
 			if autoAck && atMostOnce {
 				gi.ackInputMessage(msgInput)
 			}
-
+			gi.stats.incrTotalReceived()
 			gi.addLogTopicHandler()
+
+			gi.stats.setLastInvocation()
+			gi.stats.processTimeStart()
 
 			output, err := gi.handlerMsg(msgInput)
 			if err != nil {
@@ -137,11 +171,13 @@ CLOSE:
 				if autoAck && atLeastOnce {
 					gi.nackInputMessage(msgInput)
 				}
+				gi.stats.incrTotalUserExceptions(err)
 				return err
 			}
 
+			gi.stats.processTimeEnd()
 			gi.processResult(msgInput, output)
-
+			gi.stats.incrTotalProcessedSuccessfully()
 		case <-idleTimer.C:
 			close(channel)
 			break CLOSE
@@ -160,33 +196,62 @@ func (gi *goInstance) setupClient() error {
 	})
 	if err != nil {
 		log.Errorf("create client error:%v", err)
+		gi.stats.incrTotalSysExceptions(err)
 		return err
 	}
 	gi.client = client
 	return nil
 }
 
-func (gi *goInstance) setupProducer() (err error) {
+func (gi *goInstance) setupProducer() error {
 	if gi.context.instanceConf.funcDetails.Sink.Topic != "" && len(gi.context.instanceConf.funcDetails.Sink.Topic) > 0 {
 		log.Debugf("Setting up producer for topic %s", gi.context.instanceConf.funcDetails.Sink.Topic)
-		properties := getProperties(getDefaultSubscriptionName(
-			gi.context.instanceConf.funcDetails.Tenant,
-			gi.context.instanceConf.funcDetails.Namespace,
-			gi.context.instanceConf.funcDetails.Name), gi.context.instanceConf.instanceID)
-		gi.producer, err = gi.client.CreateProducer(pulsar.ProducerOptions{
-			Topic:                   gi.context.instanceConf.funcDetails.Sink.Topic,
-			Properties:              properties,
-			CompressionType:         pulsar.LZ4,
-			BatchingMaxPublishDelay: time.Millisecond * 10,
-			// Set send timeout to be infinity to prevent potential deadlock with consumer
-			// that might happen when consumer is blocked due to unacked messages
-		})
+		producer, err := gi.getProducer(gi.context.instanceConf.funcDetails.Sink.Topic)
 		if err != nil {
-			log.Errorf("create producer error:%s", err.Error())
-			return err
+			log.Fatal(err)
+		}
+
+		gi.producer = producer
+		return nil
+	}
+
+	return nil
+}
+
+func (gi *goInstance) getProducer(topicName string) (pulsar.Producer, error) {
+	properties := getProperties(getDefaultSubscriptionName(
+		gi.context.instanceConf.funcDetails.Tenant,
+		gi.context.instanceConf.funcDetails.Namespace,
+		gi.context.instanceConf.funcDetails.Name), gi.context.instanceConf.instanceID)
+
+	batchBuilderType := pulsar.DefaultBatchBuilder
+
+	if gi.context.instanceConf.funcDetails.Sink.ProducerSpec != nil {
+		batchBuilder := gi.context.instanceConf.funcDetails.Sink.ProducerSpec.BatchBuilder
+		if batchBuilder != "" {
+			if batchBuilder == "KEY_BASED" {
+				batchBuilderType = pulsar.KeyBasedBatchBuilder
+			}
 		}
 	}
-	return nil
+
+	producer, err := gi.client.CreateProducer(pulsar.ProducerOptions{
+		Topic:                   topicName,
+		Properties:              properties,
+		CompressionType:         pulsar.LZ4,
+		BatchingMaxPublishDelay: time.Millisecond * 10,
+		BatcherBuilderType:      batchBuilderType,
+		SendTimeout:             0,
+		// Set send timeout to be infinity to prevent potential deadlock with consumer
+		// that might happen when consumer is blocked due to unacked messages
+	})
+	if err != nil {
+		gi.stats.incrTotalSysExceptions(err)
+		log.Errorf("create producer error:%s", err.Error())
+		return nil, err
+	}
+
+	return producer, err
 }
 
 func (gi *goInstance) setupConsumer() (chan pulsar.ConsumerMessage, error) {
@@ -206,16 +271,22 @@ func (gi *goInstance) setupConsumer() (chan pulsar.ConsumerMessage, error) {
 	channel := make(chan pulsar.ConsumerMessage)
 
 	var (
-		consumer pulsar.Consumer
-		err      error
+		consumer  pulsar.Consumer
+		topicName *TopicName
+		err       error
 	)
 
 	for topic, consumerConf := range funcDetails.Source.InputSpecs {
-		log.Debugf("Setting up consumer for topic: %s with subscription name: %s", topic, subscriptionName)
+		topicName, err = ParseTopicName(topic)
+		if err != nil {
+			return nil, err
+		}
+
+		log.Debugf("Setting up consumer for topic: %s with subscription name: %s", topicName.Name, subscriptionName)
 		if consumerConf.ReceiverQueueSize != nil {
 			if consumerConf.IsRegexPattern {
 				consumer, err = gi.client.Subscribe(pulsar.ConsumerOptions{
-					TopicsPattern:     topic,
+					TopicsPattern:     topicName.Name,
 					ReceiverQueueSize: int(consumerConf.ReceiverQueueSize.Value),
 					SubscriptionName:  subscriptionName,
 					Properties:        properties,
@@ -224,7 +295,7 @@ func (gi *goInstance) setupConsumer() (chan pulsar.ConsumerMessage, error) {
 				})
 			} else {
 				consumer, err = gi.client.Subscribe(pulsar.ConsumerOptions{
-					Topic:             topic,
+					Topic:             topicName.Name,
 					SubscriptionName:  subscriptionName,
 					Properties:        properties,
 					Type:              subscriptionType,
@@ -235,7 +306,7 @@ func (gi *goInstance) setupConsumer() (chan pulsar.ConsumerMessage, error) {
 		} else {
 			if consumerConf.IsRegexPattern {
 				consumer, err = gi.client.Subscribe(pulsar.ConsumerOptions{
-					TopicsPattern:    topic,
+					TopicsPattern:    topicName.Name,
 					SubscriptionName: subscriptionName,
 					Properties:       properties,
 					Type:             subscriptionType,
@@ -243,7 +314,7 @@ func (gi *goInstance) setupConsumer() (chan pulsar.ConsumerMessage, error) {
 				})
 			} else {
 				consumer, err = gi.client.Subscribe(pulsar.ConsumerOptions{
-					Topic:            topic,
+					Topic:            topicName.Name,
 					SubscriptionName: subscriptionName,
 					Properties:       properties,
 					Type:             subscriptionType,
@@ -255,9 +326,10 @@ func (gi *goInstance) setupConsumer() (chan pulsar.ConsumerMessage, error) {
 
 		if err != nil {
 			log.Errorf("create consumer error:%s", err.Error())
+			gi.stats.incrTotalSysExceptions(err)
 			return nil, err
 		}
-		gi.consumers[topic] = consumer
+		gi.consumers[topicName.Name] = consumer
 	}
 	return channel, nil
 }
@@ -265,6 +337,9 @@ func (gi *goInstance) setupConsumer() (chan pulsar.ConsumerMessage, error) {
 func (gi *goInstance) handlerMsg(input pulsar.Message) (output []byte, err error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	gi.context.SetCurrentRecord(input)
+
 	ctx = NewContext(ctx, gi.context)
 	msgInput := input.Payload()
 	return gi.function.process(ctx, msgInput)
@@ -286,18 +361,26 @@ func (gi *goInstance) processResult(msgInput pulsar.Message, output []byte) {
 				if autoAck && atLeastOnce {
 					gi.nackInputMessage(msgInput)
 				}
+				gi.stats.incrTotalSysExceptions(err)
 				log.Fatal(err)
-			} else if autoAck && !atMostOnce {
-				gi.ackInputMessage(msgInput)
+			} else {
+				if autoAck && !atMostOnce {
+					gi.ackInputMessage(msgInput)
+				}
+				gi.stats.incrTotalProcessedSuccessfully()
 			}
 		})
 	} else if autoAck && atLeastOnce {
 		gi.ackInputMessage(msgInput)
+		// Report that we processed successfully even though it's not going to an output topic?
+		// We probably shouldn't...
+		// gi.stats.incrTotalProcessedSuccessfully()
 	}
 }
 
 // ackInputMessage doesn't produce any result, or the user doesn't want the result.
 func (gi *goInstance) ackInputMessage(inputMessage pulsar.Message) {
+	log.Debugf("ack input message topic name is: %s", inputMessage.Topic())
 	gi.consumers[inputMessage.Topic()].Ack(inputMessage)
 }
 
@@ -374,17 +457,179 @@ func (gi *goInstance) healthCheck() *pb.HealthCheckResult {
 }
 
 func (gi *goInstance) getFunctionStatus() *pb.FunctionStatus {
-	return nil // Not implemented until we add the statistics features
-}
+	status := pb.FunctionStatus{}
+	status.Running = true
+	totalReceived := gi.getTotalReceived()
+	totalProcessedSuccessfully := gi.getTotalProcessedSuccessfully()
+	totalUserExceptions := gi.getTotalUserExceptions()
+	totalSysExceptions := gi.getTotalSysExceptions()
+	avgProcessLatencyMs := gi.getAvgProcessLatency()
+	lastInvocation := gi.getLastInvocation()
 
-func (gi *goInstance) getAndResetMetrics() *pb.MetricsData {
-	return nil // Not implemented until we add the statistics features
-}
+	status.NumReceived = int64(totalReceived)
+	status.NumSuccessfullyProcessed = int64(totalProcessedSuccessfully)
+	status.NumUserExceptions = int64(totalUserExceptions)
+	status.InstanceId = strconv.Itoa(gi.context.instanceConf.instanceID)
 
-func (gi *goInstance) resetMetrics() *empty.Empty {
-	return nil // Not implemented until we add the statistics features
+	status.NumUserExceptions = int64(totalUserExceptions)
+	for _, exPair := range gi.stats.latestUserException {
+		toAdd := pb.FunctionStatus_ExceptionInformation{}
+		toAdd.ExceptionString = exPair.exception.Error()
+		toAdd.MsSinceEpoch = exPair.timestamp
+		status.LatestUserExceptions = append(status.LatestUserExceptions, &toAdd)
+	}
+
+	status.NumSystemExceptions = int64(totalSysExceptions)
+	for _, exPair := range gi.stats.latestSysException {
+		toAdd := pb.FunctionStatus_ExceptionInformation{}
+		toAdd.ExceptionString = exPair.exception.Error()
+		toAdd.MsSinceEpoch = exPair.timestamp
+		status.LatestSystemExceptions = append(status.LatestSystemExceptions, &toAdd)
+	}
+	status.AverageLatency = float64(avgProcessLatencyMs)
+	status.LastInvocationTime = int64(lastInvocation)
+	return &status
 }
 
 func (gi *goInstance) getMetrics() *pb.MetricsData {
-	return nil // Not implemented until we add the statistics features
+	totalReceived := gi.getTotalReceived()
+	totalProcessedSuccessfully := gi.getTotalProcessedSuccessfully()
+	totalUserExceptions := gi.getTotalUserExceptions()
+	totalSysExceptions := gi.getTotalSysExceptions()
+	avgProcessLatencyMs := gi.getAvgProcessLatency()
+	lastInvocation := gi.getLastInvocation()
+
+	totalReceived1min := gi.getTotalReceived1min()
+	totalProcessedSuccessfully1min := gi.getTotalProcessedSuccessfully1min()
+	totalUserExceptions1min := gi.getTotalUserExceptions1min()
+	totalSysExceptions1min := gi.getTotalSysExceptions1min()
+	//avg_process_latency_ms_1min := gi.get_avg_process_latency_1min()
+
+	metricsData := pb.MetricsData{}
+	// total metrics
+	metricsData.ReceivedTotal = int64(totalReceived)
+	metricsData.ProcessedSuccessfullyTotal = int64(totalProcessedSuccessfully)
+	metricsData.SystemExceptionsTotal = int64(totalSysExceptions)
+	metricsData.UserExceptionsTotal = int64(totalUserExceptions)
+	metricsData.AvgProcessLatency = float64(avgProcessLatencyMs)
+	metricsData.LastInvocation = int64(lastInvocation)
+	// 1min metrics
+	metricsData.ReceivedTotal_1Min = int64(totalReceived1min)
+	metricsData.ProcessedSuccessfullyTotal_1Min = int64(totalProcessedSuccessfully1min)
+	metricsData.SystemExceptionsTotal_1Min = int64(totalSysExceptions1min)
+	metricsData.UserExceptionsTotal_1Min = int64(totalUserExceptions1min)
+
+	return &metricsData
+}
+
+func (gi *goInstance) getAndResetMetrics() *pb.MetricsData {
+	metricsData := gi.getMetrics()
+	gi.resetMetrics()
+	return metricsData
+}
+
+func (gi *goInstance) resetMetrics() *empty.Empty {
+	gi.stats.reset()
+	return &empty.Empty{}
+}
+
+// This method is used to get the required metrics for Prometheus.
+// Note that this doesn't distinguish between parallel function instances!
+func (gi *goInstance) getMatchingMetricFunc() func(lbl *prometheus_client.LabelPair) bool {
+	matchMetricFunc := func(lbl *prometheus_client.LabelPair) bool {
+		return *lbl.Name == "fqfn" && *lbl.Value == gi.context.GetTenantAndNamespaceAndName()
+	}
+	return matchMetricFunc
+}
+
+func (gi *goInstance) getMatchingMetricFromRegistry(metricName string) prometheus_client.Metric {
+	metricFamilies, err := reg.Gather()
+	if err != nil {
+		log.Errorf("Something went wrong when calling reg.Gather(), the metricName is: %s", metricName)
+	}
+	matchFamilyFunc := func(vect *prometheus_client.MetricFamily) bool {
+		return *vect.Name == metricName
+	}
+	filteredMetricFamilies := filter(metricFamilies, matchFamilyFunc)
+	if len(filteredMetricFamilies) > 1 {
+		// handle this.
+		log.Errorf("Too many metric families for metricName: %s " + metricName)
+	}
+	metricFunc := gi.getMatchingMetricFunc()
+	matchingMetric := getFirstMatch(filteredMetricFamilies[0].Metric, metricFunc)
+	return *matchingMetric
+}
+
+func (gi *goInstance) getTotalReceived() float32 {
+	// "pulsar_function_" + "received_total", NewGaugeVec.
+	metric := gi.getMatchingMetricFromRegistry(PulsarFunctionMetricsPrefix + TotalReceived)
+	val := metric.GetGauge().Value
+	return float32(*val)
+}
+
+func (gi *goInstance) getTotalProcessedSuccessfully() float32 {
+	metric := gi.getMatchingMetricFromRegistry(PulsarFunctionMetricsPrefix + TotalSuccessfullyProcessed)
+	// "pulsar_function_" + "processed_successfully_total", NewGaugeVec.
+	val := metric.GetGauge().Value
+	return float32(*val)
+}
+
+func (gi *goInstance) getTotalSysExceptions() float32 {
+	metric := gi.getMatchingMetricFromRegistry(PulsarFunctionMetricsPrefix + TotalSystemExceptions)
+	// "pulsar_function_"+ "system_exceptions_total", NewGaugeVec.
+	val := metric.GetGauge().Value
+	return float32(*val)
+}
+
+func (gi *goInstance) getTotalUserExceptions() float32 {
+	metric := gi.getMatchingMetricFromRegistry(PulsarFunctionMetricsPrefix + TotalUserExceptions)
+	// "pulsar_function_" + "user_exceptions_total", NewGaugeVec
+	val := metric.GetGauge().Value
+	return float32(*val)
+}
+
+func (gi *goInstance) getAvgProcessLatency() float32 {
+	metric := gi.getMatchingMetricFromRegistry(PulsarFunctionMetricsPrefix + ProcessLatencyMs)
+	// "pulsar_function_" + "process_latency_ms", SummaryVec.
+	count := metric.GetSummary().SampleCount
+	sum := metric.GetSummary().SampleSum
+	if *count <= 0.0 {
+		return 0.0
+	}
+	return float32(*sum) / float32(*count)
+}
+
+func (gi *goInstance) getLastInvocation() float32 {
+	metric := gi.getMatchingMetricFromRegistry(PulsarFunctionMetricsPrefix + LastInvocation)
+	// "pulsar_function_" + "last_invocation", GaugeVec.
+	val := metric.GetGauge().Value
+	return float32(*val)
+}
+
+func (gi *goInstance) getTotalProcessedSuccessfully1min() float32 {
+	metric := gi.getMatchingMetricFromRegistry(PulsarFunctionMetricsPrefix + TotalSuccessfullyProcessed1min)
+	// "pulsar_function_" + "processed_successfully_total_1min", GaugeVec.
+	val := metric.GetGauge().Value
+	return float32(*val)
+}
+
+func (gi *goInstance) getTotalSysExceptions1min() float32 {
+	metric := gi.getMatchingMetricFromRegistry(PulsarFunctionMetricsPrefix + TotalSystemExceptions1min)
+	// "pulsar_function_" + "system_exceptions_total_1min", GaugeVec
+	val := metric.GetGauge().Value
+	return float32(*val)
+}
+
+func (gi *goInstance) getTotalUserExceptions1min() float32 {
+	metric := gi.getMatchingMetricFromRegistry(PulsarFunctionMetricsPrefix + TotalUserExceptions1min)
+	// "pulsar_function_" + "user_exceptions_total_1min", GaugeVec
+	val := metric.GetGauge().Value
+	return float32(*val)
+}
+
+func (gi *goInstance) getTotalReceived1min() float32 {
+	metric := gi.getMatchingMetricFromRegistry(PulsarFunctionMetricsPrefix + TotalReceived1min)
+	// "pulsar_function_" +  "received_total_1min", GaugeVec
+	val := metric.GetGauge().Value
+	return float32(*val)
 }

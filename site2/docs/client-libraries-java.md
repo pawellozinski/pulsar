@@ -107,7 +107,7 @@ String | `authParams` | String represents parameters for the authentication plug
 long|`operationTimeoutMs`|Operation timeout |30000
 long|`statsIntervalSeconds`|Interval between each stats info<br/><br/>Stats is activated with positive `statsInterval`<br/><br/>Set `statsIntervalSeconds` to 1 second at least |60
 int|`numIoThreads`| The number of threads used for handling connections to brokers | 1 
-int|`numListenerThreads`|The number of threads used for handling message listeners | 1 
+int|`numListenerThreads`|The number of threads used for handling message listeners. The listener thread pool is shared across all the consumers and readers using the "listener" model to get messages. For a given consumer, the listener is always invoked from the same thread to ensure ordering. If you want multiple threads to process a single topic, you need to create a [`shared`](https://pulsar.apache.org/docs/en/next/concepts-messaging/#shared) subscription and multiple consumers for this subscription. This does not ensure ordering.| 1 
 boolean|`useTcpNoDelay`|Whether to use TCP no-delay flag on the connection to disable Nagle algorithm |true
 boolean |`useTls` |Whether to use TLS encryption on the connection| false
 string | `tlsTrustCertsFilePath` |Path to the trusted TLS certificate file|None
@@ -277,7 +277,7 @@ Type | Name| <div style="width:300px">Description</div>|  Default
 Set&lt;String&gt;|	`topicNames`|	Topic name|	Sets.newTreeSet()
 Pattern|   `topicsPattern`|	Topic pattern	|None
 String|	`subscriptionName`|	Subscription name|	None
-SubscriptionType| `subscriptionType`|	Subscription type <br/><br/>Three subscription types are available:<li>Exclusive</li><li>Failover</li><li>Shared</li>|SubscriptionType.Exclusive
+SubscriptionType| `subscriptionType`|	Subscription type <br/><br/>Four subscription types are available:<li>Exclusive</li><li>Failover</li><li>Shared</li><li>Key_Shared</li>|SubscriptionType.Exclusive
 int | `receiverQueueSize` | Size of a consumer's receiver queue. <br/><br/>For example, the number of messages accumulated by a consumer before an application calls `Receive`. <br/><br/>A value higher than the default value increases consumer throughput, though at the expense of more memory utilization.| 1000
 long|`acknowledgementsGroupTimeMicros`|Group a consumer acknowledgment for a specified time.<br/><br/>By default, a consumer uses 100ms grouping time to send out acknowledgments to a broker.<br/><br/>Setting a group time of 0 sends out acknowledgments immediately. <br/><br/>A longer ack group time is more efficient at the expense of a slight increase in message re-deliveries after a failure.|TimeUnit.MILLISECONDS.toMicros(100)
 long|`negativeAckRedeliveryDelayMicros`|Delay to wait before redelivering messages that failed to be processed.<br/><br/> When an application uses {@link Consumer#negativeAcknowledge(Message)}, failed messages are redelivered after a fixed timeout. |TimeUnit.MINUTES.toMicros(1)
@@ -329,7 +329,7 @@ The following is an example.
 
 ```java
 Messages messages = consumer.batchReceive();
-for (message in messages) {
+for (Object message : messages) {
   // do something
 }
 consumer.acknowledge(messages)
@@ -379,17 +379,32 @@ ConsumerBuilder consumerBuilder = pulsarClient.newConsumer()
         .subscriptionName(subscription);
 
 // Subscribe to all topics in a namespace
-Pattern allTopicsInNamespace = Pattern.compile("persistent://public/default/.*");
+Pattern allTopicsInNamespace = Pattern.compile("public/default/.*");
 Consumer allTopicsConsumer = consumerBuilder
         .topicsPattern(allTopicsInNamespace)
         .subscribe();
 
 // Subscribe to a subsets of topics in a namespace, based on regex
-Pattern someTopicsInNamespace = Pattern.compile("persistent://public/default/foo.*");
+Pattern someTopicsInNamespace = Pattern.compile("public/default/foo.*");
 Consumer allTopicsConsumer = consumerBuilder
         .topicsPattern(someTopicsInNamespace)
         .subscribe();
 ```
+
+In the above example, the consumer subscribes to the `persistent` topics that can match the topic name pattern. If you want the consumer subscribes to all `persistent` and `non-persistent` topics that can match the topic name pattern, set `subscriptionTopicsMode` to `RegexSubscriptionMode.AllTopics`.
+
+```java
+Pattern pattern = Pattern.compile("public/default/.*");
+pulsarClient.newConsumer()
+        .subscriptionName("my-sub")
+        .topicsPattern(pattern)
+        .subscriptionTopicsMode(RegexSubscriptionMode.AllTopics)
+        .subscribe();
+```
+
+> #### Note
+> 
+> By default, the `subscriptionTopicsMode` of the consumer is `PersistentOnly`. Available options of `subscriptionTopicsMode` are `PersistentOnly`, `NonPersistentOnly`, and `AllTopics`.
 
 You can also subscribe to an explicit list of topics (across namespaces if you wish):
 
@@ -406,7 +421,7 @@ Consumer multiTopicConsumer = consumerBuilder
 
 // Alternatively:
 Consumer multiTopicConsumer = consumerBuilder
-        .topics(
+        .topic(
             "topic-1",
             "topic-2",
             "topic-3"
@@ -423,8 +438,8 @@ consumerBuilder
         .subscribeAsync()
         .thenAccept(this::receiveMessageFromConsumer);
 
-private void receiveMessageFromConsumer(Consumer consumer) {
-    consumer.receiveAsync().thenAccept(message -> {
+private void receiveMessageFromConsumer(Object consumer) {
+    ((Consumer)consumer).receiveAsync().thenAccept(message -> {
                 // Do something with the received message
                 receiveMessageFromConsumer(consumer);
             });
@@ -608,18 +623,33 @@ consumer2 receives the follwoing information.
 ("key-4", "message-4-2")
 ```
 
+If batching is enabled at the producer side, messages with different keys are added to a batch by default. The broker will dispatch the batch to the consumer, so the default batch mechanism may break the Key_Shared subscription guaranteed message distribution semantics. The producer needs to use the `KeyBasedBatcher`.
+
+```java
+Producer producer = client.newProducer()
+        .topic("my-topic")
+        .batcherBuilder(BatcherBuilder.KEY_BASED)
+        .create();
+```
+Or the producer can disable batching.
+
+```java
+Producer producer = client.newProducer()
+        .topic("my-topic")
+        .enableBatching(false)
+        .create();
+```
 > Note:
 >
 > If the message key is not specified, messages without key are dispatched to one consumer in order by default.
 
 ## Reader 
 
-With the [reader interface](concepts-clients.md#reader-interface), Pulsar clients can "manually position" themselves within a topic and reading all messages from a specified message onward. The Pulsar API for Java enables you to create {@inject: javadoc:Reader:/client/org/apache/pulsar/client/api/Reader} objects by specifying a topic, a {@inject: javadoc:MessageId:/client/org/apache/pulsar/client/api/MessageId}, and {@inject: javadoc:ReaderConfiguration:/client/org/apache/pulsar/client/api/ReaderConfiguration}.
+With the [reader interface](concepts-clients.md#reader-interface), Pulsar clients can "manually position" themselves within a topic and reading all messages from a specified message onward. The Pulsar API for Java enables you to create {@inject: javadoc:Reader:/client/org/apache/pulsar/client/api/Reader} objects by specifying a topic and a {@inject: javadoc:MessageId:/client/org/apache/pulsar/client/api/MessageId}.
 
 The following is an example.
 
 ```java
-ReaderConfiguration conf = new ReaderConfiguration();
 byte[] msgIdBytes = // Some message ID byte array
 MessageId id = MessageId.fromByteArray(msgIdBytes);
 Reader reader = pulsarClient.newReader()
@@ -637,6 +667,7 @@ In the example above, a `Reader` object is instantiated for a specific topic and
 
 The code sample above shows pointing the `Reader` object to a specific message (by ID), but you can also use `MessageId.earliest` to point to the earliest available message on the topic of `MessageId.latest` to point to the most recent available message.
 
+### Configure reader
 When you create a reader, you can use the `loadConf` configuration. The following parameters are available in `loadConf`.
 
 | Type | Name | <div style="width:300px">Description</div> | Default
@@ -645,6 +676,8 @@ String|`topicName`|Topic name. |None
 int|`receiverQueueSize`|Size of a consumer's receiver queue.<br/><br/>For example, the number of messages that can be accumulated by a consumer before an application calls `Receive`.<br/><br/>A value higher than the default value increases consumer throughput, though at the expense of more memory utilization.|1000
 ReaderListener&lt;T&gt;|`readerListener`|A listener that is called for message received.|None
 String|`readerName`|Read name.|null
+String| `subscriptionName`|Subscription name|When there is a single topic, the default subscription name is `"reader-" + 10-digit UUID`.
+When there are multiple topics, the default subscription name is `"multiTopicsReader-" + 10-digit UUID`.
 String|`subscriptionRolePrefix`|Prefix of subscription role. |null
 CryptoKeyReader|`cryptoKeyReader`|Interface that abstracts the access to a key store.|null
 ConsumerCryptoFailureAction|`cryptoFailureAction`|Consumer should take action when it receives a message that can not be decrypted.<br/><br/><li>**FAIL**: this is the default option to fail messages until crypto succeeds.</li><br/><li> **DISCARD**: silently acknowledge and not deliver message to an application.</li><br/><li>**CONSUME**: deliver encrypted messages to applications. It is the application's responsibility to decrypt the message.<br/><br/>The message decompression fails. <br/><br/>If messages contain batch messages, a client is not be able to retrieve individual messages in batch.<br/><br/>Delivered encrypted message contains {@link EncryptionContext} which contains encryption and compression information in it using which application can decrypt consumed message payload.|ConsumerCryptoFailureAction.FAIL</li>
@@ -765,7 +798,7 @@ The following schema formats are currently available for Java:
 
 ## Authentication
 
-Pulsar currently supports two authentication schemes: [TLS](security-tls-authentication.md) and [Athenz](security-athenz.md). You can use the Pulsar Java client with both.
+Pulsar currently supports three authentication schemes: [TLS](security-tls-authentication.md), [Athenz](security-athenz.md), and [Oauth2](security-oauth2.md). You can use the Pulsar Java client with all of them.
 
 ### TLS Authentication
 
@@ -824,3 +857,28 @@ PulsarClient client = PulsarClient.builder()
 > * `file:///path/to/file`
 > * `file:/path/to/file`
 > * `data:application/x-pem-file;base64,<base64-encoded value>`
+
+### Oauth2
+
+The following example shows how to use [Oauth2](security-oauth2.md) as an authentication provider for the Pulsar Java client.
+
+You can use the factory method to configure authentication for Pulsar Java client.
+
+```java
+PulsarClient client = PulsarClient.builder()
+    .serviceUrl("pulsar://broker.example.com:6650/")
+    .authentication(
+        AuthenticationFactoryOAuth2.clientCredentials(this.issuerUrl, this.credentialsUrl, this.audience))
+    .build();
+```
+
+In addition, you can also use the encoded parameters to configure authentication for Pulsar Java client.
+
+```java
+Authentication auth = AuthenticationFactory
+    .create(AuthenticationOAuth2.class.getName(), "{"type":"client_credentials","privateKey":"...","issuerUrl":"...","audience":"..."}");
+PulsarClient client = PulsarClient.builder()
+    .serviceUrl("pulsar://broker.example.com:6650/")
+    .authentication(auth)
+    .build();
+```

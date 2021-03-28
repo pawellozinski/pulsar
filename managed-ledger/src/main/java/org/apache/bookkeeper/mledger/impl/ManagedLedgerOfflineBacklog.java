@@ -22,7 +22,6 @@ import com.google.common.collect.BoundType;
 import com.google.common.collect.Range;
 import com.google.protobuf.InvalidProtocolBufferException;
 import java.util.Enumeration;
-import java.util.Iterator;
 import java.util.List;
 import java.util.NavigableMap;
 import java.util.concurrent.ConcurrentSkipListMap;
@@ -52,8 +51,8 @@ public class ManagedLedgerOfflineBacklog {
     private final byte[] password;
     private final BookKeeper.DigestType digestType;
     private static final int META_READ_TIMEOUT_SECONDS = 60;
-    private boolean accurate = false;
-    private String brokerName;
+    private final boolean accurate;
+    private final String brokerName;
 
     public ManagedLedgerOfflineBacklog(DigestType digestType, byte[] password, String brokerName,
             boolean accurate) {
@@ -157,7 +156,7 @@ public class ManagedLedgerOfflineBacklog {
                             final long id = ledgers.lastKey();
                             AsyncCallback.OpenCallback opencb = (rc, lh, ctx1) -> {
                                 if (log.isDebugEnabled()) {
-                                    log.debug("[{}] Opened ledger {}: ", managedLedgerName, id,
+                                    log.debug("[{}] Opened ledger {}: {}", managedLedgerName, id,
                                             BKException.getMessage(rc));
                                 }
                                 if (rc == BKException.Code.OK) {
@@ -195,7 +194,7 @@ public class ManagedLedgerOfflineBacklog {
 
                     @Override
                     public void operationFailed(ManagedLedgerException.MetaStoreException e) {
-                        log.warn("[{}] Unable to obtain managed ledger metadata - {}", e);
+                        log.warn("[{}] Unable to obtain managed ledger metadata - {}", managedLedgerName, e);
                         mlMetaCounter.countDown();
                     }
                 });
@@ -220,7 +219,7 @@ public class ManagedLedgerOfflineBacklog {
         MetaStore store = factory.getMetaStore();
         BookKeeper bk = factory.getBookKeeper();
         final CountDownLatch allCursorsCounter = new CountDownLatch(1);
-        final long errorInReadingCursor = (long) -1;
+        final long errorInReadingCursor = -1;
         ConcurrentOpenHashMap<String, Long> ledgerRetryMap = new ConcurrentOpenHashMap<>();
 
         final MLDataFormats.ManagedLedgerInfo.LedgerInfo ledgerInfo = ledgers.lastEntry().getValue();
@@ -431,9 +430,7 @@ public class ManagedLedgerOfflineBacklog {
         PositionImpl lastAckedMessagePosition = null;
         try {
             bookKeeperAdmin = new BookKeeperAdmin(bookKeeper);
-            Iterator<LedgerEntry> entries = bookKeeperAdmin.readEntries(ledgerId, 0, lastEntry).iterator();
-            while (entries.hasNext()) {
-                LedgerEntry ledgerEntry = entries.next();
+            for (LedgerEntry ledgerEntry : bookKeeperAdmin.readEntries(ledgerId, 0, lastEntry)) {
                 lastEntry = ledgerEntry.getEntryId();
                 if (log.isDebugEnabled()) {
                     log.debug(" Read entry {} from ledger {} for cursor {}", lastEntry, ledgerId, cursorName);

@@ -32,6 +32,7 @@
 #include "ConsumerImplBase.h"
 #include "lib/UnAckedMessageTrackerDisabled.h"
 #include "MessageCrypto.h"
+#include "AckGroupingTracker.h"
 
 #include "CompressionCodec.h"
 #include <boost/dynamic_bitset.hpp>
@@ -42,6 +43,7 @@
 #include <lib/stats/ConsumerStatsImpl.h>
 #include <lib/stats/ConsumerStatsDisabled.h>
 #include <queue>
+#include <atomic>
 
 using namespace pulsar;
 
@@ -63,27 +65,40 @@ class ConsumerImpl : public ConsumerImplBase,
                      public HandlerBase,
                      public std::enable_shared_from_this<ConsumerImpl> {
    public:
-    ConsumerImpl(const ClientImplPtr client, const std::string& topic, const std::string& subscription,
+    ConsumerImpl(const ClientImplPtr client, const std::string& topic, const std::string& subscriptionName,
                  const ConsumerConfiguration&,
-                 const ExecutorServicePtr listenerExecutor = ExecutorServicePtr(),
+                 const ExecutorServicePtr listenerExecutor = ExecutorServicePtr(), bool hasParent = false,
                  const ConsumerTopicType consumerTopicType = NonPartitioned,
                  Commands::SubscriptionMode = Commands::SubscriptionModeDurable,
                  Optional<MessageId> startMessageId = Optional<MessageId>::empty());
     ~ConsumerImpl();
     void setPartitionIndex(int partitionIndex);
     int getPartitionIndex();
-    void receiveMessages(const ClientConnectionPtr& cnx, unsigned int count);
+    void sendFlowPermitsToBroker(const ClientConnectionPtr& cnx, int numMessages);
     uint64_t getConsumerId();
     void messageReceived(const ClientConnectionPtr& cnx, const proto::CommandMessage& msg,
                          bool& isChecksumValid, proto::MessageMetadata& msgMetadata, SharedBuffer& payload);
-    int incrementAndGetPermits(uint64_t cnxSequenceId);
     void messageProcessed(Message& msg);
     inline proto::CommandSubscribe_SubType getSubType();
     inline proto::CommandSubscribe_InitialPosition getInitialPosition();
     void unsubscribeAsync(ResultCallback callback);
     void handleUnsubscribe(Result result, ResultCallback callback);
-    void doAcknowledge(const MessageId& messageId, proto::CommandAck_AckType ackType,
-                       ResultCallback callback);
+
+    /**
+     * Send individual ACK request of given message ID to broker.
+     * @param[in] messageId ID of the message to be ACKed.
+     * @param[in] callback call back function, which is called after sending ACK. For now, it's
+     *      always provided with ResultOk.
+     */
+    void doAcknowledgeIndividual(const MessageId& messageId, ResultCallback callback);
+
+    /**
+     * Send cumulative ACK request of given message ID to broker.
+     * @param[in] messageId ID of the message to be ACKed.
+     * @param[in] callback call back function, which is called after sending ACK. For now, it's
+     *      always provided with ResultOk.
+     */
+    void doAcknowledgeCumulative(const MessageId& messageId, ResultCallback callback);
     virtual void disconnectConsumer();
     virtual Future<Result, ConsumerImplBaseWeakPtr> getConsumerCreatedFuture();
     virtual const std::string& getSubscriptionName() const;
@@ -98,6 +113,7 @@ class ConsumerImpl : public ConsumerImplBase,
     virtual bool isCumulativeAcknowledgementAllowed(ConsumerType consumerType);
 
     virtual void redeliverMessages(const std::set<MessageId>& messageIds);
+    virtual void redeliverUnacknowledgedMessages(const std::set<MessageId>& messageIds);
     virtual void negativeAcknowledge(const MessageId& msgId);
 
     virtual void closeAsync(ResultCallback callback);
@@ -134,7 +150,7 @@ class ConsumerImpl : public ConsumerImplBase,
                                    const proto::MessageMetadata& metadata, SharedBuffer& payload);
     void discardCorruptedMessage(const ClientConnectionPtr& cnx, const proto::MessageIdData& messageId,
                                  proto::CommandAck::ValidationError validationError);
-    void increaseAvailablePermits(const ClientConnectionPtr& currentCnx, int numberOfPermits = 1);
+    void increaseAvailablePermits(const ClientConnectionPtr& currentCnx, int delta = 1);
     void drainIncomingMessageQueue(size_t count);
     uint32_t receiveIndividualMessagesFromBatch(const ClientConnectionPtr& cnx, Message& batchedMessage,
                                                 int redeliveryCount);
@@ -149,6 +165,8 @@ class ConsumerImpl : public ConsumerImplBase,
     void statsCallback(Result, ResultCallback, proto::CommandAck_AckType);
     void notifyPendingReceivedCallback(Result result, Message& message, const ReceiveCallback& callback);
     void failPendingReceiveCallback();
+    virtual void setNegativeAcknowledgeEnabledForTesting(bool enabled);
+    void trackMessage(const Message& msg);
 
     Optional<MessageId> clearReceiveQueue();
 
@@ -158,6 +176,7 @@ class ConsumerImpl : public ConsumerImplBase,
     std::string originalSubscriptionName_;
     MessageListener messageListener_;
     ExecutorServicePtr listenerExecutor_;
+    bool hasParent_;
     ConsumerTopicType consumerTopicType_;
 
     Commands::SubscriptionMode subscriptionMode_;
@@ -166,19 +185,20 @@ class ConsumerImpl : public ConsumerImplBase,
     Optional<MessageId> lastDequedMessage_;
     UnboundedBlockingQueue<Message> incomingMessages_;
     std::queue<ReceiveCallback> pendingReceives_;
-    int availablePermits_;
+    std::atomic_int availablePermits_;
+    const int receiverQueueRefillThreshold_;
     uint64_t consumerId_;
     std::string consumerName_;
     std::string consumerStr_;
     int32_t partitionIndex_;
     Promise<Result, ConsumerImplBaseWeakPtr> consumerCreatedPromise_;
-    bool messageListenerRunning_;
-    std::mutex messageListenerMutex_;
+    std::atomic_bool messageListenerRunning_;
     CompressionCodecProvider compressionCodecProvider_;
-    UnAckedMessageTrackerScopedPtr unAckedMessageTrackerPtr_;
+    UnAckedMessageTrackerPtr unAckedMessageTrackerPtr_;
     BatchAcknowledgementTracker batchAcknowledgementTracker_;
     BrokerConsumerStatsImpl brokerConsumerStats_;
     NegativeAcksTracker negativeAcksTracker_;
+    AckGroupingTrackerPtr ackGroupingTrackerPtr_;
 
     MessageCryptoPtr msgCrypto_;
     const bool readCompacted_;
@@ -196,6 +216,14 @@ class ConsumerImpl : public ConsumerImplBase,
     }
 
     friend class PulsarFriend;
+
+    // these two declared friend to access setNegativeAcknowledgeEnabledForTesting
+    friend class MultiTopicsConsumerImpl;
+    friend class PartitionedConsumerImpl;
+
+    FRIEND_TEST(ConsumerTest, testPartitionedConsumerUnAckedMessageRedelivery);
+    FRIEND_TEST(ConsumerTest, testMultiTopicsConsumerUnAckedMessageRedelivery);
+    FRIEND_TEST(ConsumerTest, testBatchUnAckedMessageTracker);
 };
 
 } /* namespace pulsar */

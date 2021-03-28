@@ -11,6 +11,9 @@ Pulsar Functions support the following methods to run functions.
 - *Process*: Invoke functions in processes forked by Functions Worker.
 - *Kubernetes*: Submit functions as Kubernetes StatefulSets by Functions Worker.
 
+#### Note
+> Pulsar supports adding labels to the Kubernetes StatefulSets and services while launching functions, which facilitates selecting the target Kubernetes objects.
+
 The differences of the thread and process modes are:
 - Thread mode: when a function runs in thread mode, it runs on the same Java virtual machine (JVM) with Functions worker.
 - Process mode: when a function runs in process mode, it runs on the same machine that Functions worker runs.
@@ -19,7 +22,8 @@ The differences of the thread and process modes are:
 It is easy to configure *Thread* runtime. In most cases, you do not need to configure anything. You can customize the thread group name with the following settings:
 
 ```yaml
-threadContainerFactory:
+functionRuntimeFactoryClassName: org.apache.pulsar.functions.runtime.thread.ThreadRuntimeFactory
+functionRuntimeFactoryConfigs:
   threadGroupName: "Your Function Container Group"
 ```
 
@@ -29,7 +33,8 @@ threadContainerFactory:
 When you enable *Process* runtime, you do not need to configure anything.
 
 ```yaml
-processContainerFactory:
+functionRuntimeFactoryClassName: org.apache.pulsar.functions.runtime.process.ProcessRuntimeFactory
+functionRuntimeFactoryConfigs:
   # the directory for storing the function logs
   logDirectory:
   # change the jar location only when you put the java instance jar in a different location
@@ -47,7 +52,8 @@ processContainerFactory:
 It is easy to configure Kubernetes runtime. You can just uncomment the settings of `kubernetesContainerFactory` in the `functions_worker.yaml` file. The following is an example.
 
 ```yaml
-kubernetesContainerFactory:
+functionRuntimeFactoryClassName: org.apache.pulsar.functions.runtime.kubernetes.KubernetesRuntimeFactory
+functionRuntimeFactoryConfigs:
   # uri to kubernetes cluster, leave it to empty and it will use the kubernetes settings in function worker
   k8Uri:
   # the kubernetes namespace to run the function instances. it is `default`, if this setting is left to be empty

@@ -40,6 +40,7 @@ import org.apache.pulsar.common.schema.SchemaType;
 import org.testng.Assert;
 import org.testng.annotations.Test;
 
+@Test(groups = "broker")
 public class JsonSchemaCompatibilityCheckTest extends BaseAvroSchemaCompatibilityTest{
 
     @Override
@@ -123,6 +124,11 @@ public class JsonSchemaCompatibilityCheckTest extends BaseAvroSchemaCompatibilit
             info.setType(SchemaType.JSON);
             info.setSchema(mapper.writeValueAsBytes(schema));
             return new OldJSONSchema<>(info, pojo, mapper);
+        }
+
+        @Override
+        public Schema<T> clone() {
+            return this;
         }
     }
 }

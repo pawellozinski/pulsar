@@ -18,22 +18,30 @@
  */
 package org.apache.pulsar.sql.presto;
 
-import com.facebook.presto.spi.ColumnHandle;
-import com.facebook.presto.spi.ConnectorSession;
-import com.facebook.presto.spi.ConnectorSplitSource;
-import com.facebook.presto.spi.connector.ConnectorTransactionHandle;
-import com.facebook.presto.spi.predicate.Domain;
-import com.facebook.presto.spi.predicate.Range;
-import com.facebook.presto.spi.predicate.TupleDomain;
-import com.facebook.presto.spi.predicate.ValueSet;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.airlift.json.JsonCodec;
 import io.airlift.log.Logger;
+import io.prestosql.spi.connector.ColumnHandle;
+import io.prestosql.spi.connector.ConnectorSession;
+import io.prestosql.spi.connector.ConnectorSplitSource;
+import io.prestosql.spi.connector.ConnectorTransactionHandle;
+import io.prestosql.spi.predicate.Domain;
+import io.prestosql.spi.predicate.Range;
+import io.prestosql.spi.predicate.TupleDomain;
+import io.prestosql.spi.predicate.ValueSet;
 import org.apache.bookkeeper.mledger.impl.PositionImpl;
+import org.apache.pulsar.client.impl.schema.JSONSchema;
 import org.apache.pulsar.common.naming.TopicName;
+import org.apache.pulsar.common.policies.data.OffloadPolicies;
+import org.apache.pulsar.common.schema.SchemaInfo;
+import org.apache.pulsar.common.schema.SchemaType;
 import org.mockito.invocation.InvocationOnMock;
 import org.mockito.stubbing.Answer;
 import org.testng.Assert;
 import org.testng.annotations.Test;
 
+import java.io.UnsupportedEncodingException;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.LinkedList;
@@ -41,8 +49,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 
-import static com.facebook.presto.spi.type.TimestampType.TIMESTAMP;
-import static com.facebook.presto.spi.type.IntegerType.INTEGER;
+import static io.prestosql.spi.type.IntegerType.INTEGER;
+import static io.prestosql.spi.type.TimestampType.TIMESTAMP;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.anyInt;
 import static org.mockito.Mockito.doAnswer;
@@ -53,8 +61,8 @@ import static org.mockito.Mockito.when;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertTrue;
 import static org.testng.Assert.assertNotNull;
+import static org.testng.Assert.fail;
 
-@Test(singleThreaded = true)
 public class TestPulsarSplitManager extends TestPulsarConnector {
 
     private static final Logger log = Logger.get(TestPulsarSplitManager.class);
@@ -72,7 +80,7 @@ public class TestPulsarSplitManager extends TestPulsarConnector {
         }
     }
 
-    @Test(dataProvider = "rewriteNamespaceDelimiter")
+    @Test(dataProvider = "rewriteNamespaceDelimiter", singleThreaded = true)
     public void testTopic(String delimiter) throws Exception {
         updateRewriteNamespaceDelimiterIfNeeded(delimiter);
         List<TopicName> topics = new LinkedList<>();
@@ -121,7 +129,7 @@ public class TestPulsarSplitManager extends TestPulsarConnector {
 
     }
 
-    @Test(dataProvider = "rewriteNamespaceDelimiter")
+    @Test(dataProvider = "rewriteNamespaceDelimiter", singleThreaded = true)
     public void testPartitionedTopic(String delimiter) throws Exception {
         updateRewriteNamespaceDelimiterIfNeeded(delimiter);
         for (TopicName topicName : partitionedTopicNames) {
@@ -178,7 +186,7 @@ public class TestPulsarSplitManager extends TestPulsarConnector {
         }).collect(Collectors.toList());
     }
 
-    @Test(dataProvider = "rewriteNamespaceDelimiter")
+    @Test(dataProvider = "rewriteNamespaceDelimiter", singleThreaded = true)
     public void testPublishTimePredicatePushdown(String delimiter) throws Exception {
         updateRewriteNamespaceDelimiterIfNeeded(delimiter);
         TopicName topicName = TOPIC_1;
@@ -235,7 +243,7 @@ public class TestPulsarSplitManager extends TestPulsarConnector {
 
     }
 
-    @Test(dataProvider = "rewriteNamespaceDelimiter")
+    @Test(dataProvider = "rewriteNamespaceDelimiter", singleThreaded = true)
     public void testPublishTimePredicatePushdownPartitionedTopic(String delimiter) throws Exception {
         updateRewriteNamespaceDelimiterIfNeeded(delimiter);
         TopicName topicName = PARTITIONED_TOPIC_1;
@@ -296,7 +304,7 @@ public class TestPulsarSplitManager extends TestPulsarConnector {
         }
     }
 
-    @Test(dataProvider = "rewriteNamespaceDelimiter")
+    @Test(dataProvider = "rewriteNamespaceDelimiter", singleThreaded = true)
     public void testPartitionFilter(String delimiter) throws Exception {
         updateRewriteNamespaceDelimiterIfNeeded(delimiter);
         for (TopicName topicName : partitionedTopicNames) {
@@ -382,7 +390,7 @@ public class TestPulsarSplitManager extends TestPulsarConnector {
 
     }
 
-    @Test(dataProvider = "rewriteNamespaceDelimiter")
+    @Test(dataProvider = "rewriteNamespaceDelimiter", singleThreaded = true)
     public void testGetSplitNonSchema(String delimiter) throws Exception {
         updateRewriteNamespaceDelimiterIfNeeded(delimiter);
         TopicName topicName = NON_SCHEMA_TOPIC;
@@ -402,4 +410,77 @@ public class TestPulsarSplitManager extends TestPulsarConnector {
             pulsarTableLayoutHandle, null);
         assertNotNull(connectorSplitSource);
     }
+
+    @Test
+    public void pulsarSplitJsonCodecTest() throws JsonProcessingException, UnsupportedEncodingException {
+        OffloadPolicies offloadPolicies = OffloadPolicies.create(
+                "aws-s3",
+                "test-region",
+                "test-bucket",
+                "test-endpoint",
+                "test-credential-id",
+                "test-credential-secret",
+                5000,
+                2000,
+                1000L,
+                5000L,
+                OffloadPolicies.OffloadedReadPriority.BOOKKEEPER_FIRST
+        );
+
+        SchemaInfo schemaInfo = JSONSchema.of(Foo.class).getSchemaInfo();
+        final String schema = new String(schemaInfo.getSchema(),  "ISO8859-1");
+        final String originSchemaName = schemaInfo.getName();
+        final String schemaName = schemaInfo.getName();
+        final String schemaInfoProperties = new ObjectMapper().writeValueAsString(schemaInfo.getProperties());
+        final SchemaType schemaType = schemaInfo.getType();
+
+        final long splitId = 1;
+        final String connectorId = "connectorId";
+        final String tableName = "tableName";
+        final long splitSize = 5;
+        final long startPositionEntryId = 22;
+        final long endPositionEntryId = 33;
+        final long startPositionLedgerId = 10;
+        final long endPositionLedgerId = 21;
+        final TupleDomain<ColumnHandle> tupleDomain = TupleDomain.all();
+
+        byte[] pulsarSplitData;
+        JsonCodec<PulsarSplit> jsonCodec = JsonCodec.jsonCodec(PulsarSplit.class);
+        try {
+            PulsarSplit pulsarSplit = new PulsarSplit(
+                    splitId, connectorId, schemaName, originSchemaName, tableName, splitSize, schema,
+                    schemaType, startPositionEntryId, endPositionEntryId, startPositionLedgerId,
+                    endPositionLedgerId, tupleDomain, schemaInfoProperties, offloadPolicies);
+            pulsarSplitData = jsonCodec.toJsonBytes(pulsarSplit);
+        } catch (Exception e) {
+            e.printStackTrace();
+            log.error("Failed to serialize the PulsarSplit.", e);
+            fail("Failed to serialize the PulsarSplit.");
+            return;
+        }
+
+        try {
+            PulsarSplit pulsarSplit = jsonCodec.fromJson(pulsarSplitData);
+            Assert.assertEquals(pulsarSplit.getSchema(), schema);
+            Assert.assertEquals(pulsarSplit.getOriginSchemaName(), originSchemaName);
+            Assert.assertEquals(pulsarSplit.getSchemaName(), schemaName);
+            Assert.assertEquals(pulsarSplit.getSchemaInfoProperties(), schemaInfoProperties);
+            Assert.assertEquals(pulsarSplit.getSchemaType(), schemaType);
+            Assert.assertEquals(pulsarSplit.getSplitId(), splitId);
+            Assert.assertEquals(pulsarSplit.getConnectorId(), connectorId);
+            Assert.assertEquals(pulsarSplit.getTableName(), tableName);
+            Assert.assertEquals(pulsarSplit.getSplitSize(), splitSize);
+            Assert.assertEquals(pulsarSplit.getStartPositionEntryId(), startPositionEntryId);
+            Assert.assertEquals(pulsarSplit.getEndPositionEntryId(), endPositionEntryId);
+            Assert.assertEquals(pulsarSplit.getStartPositionLedgerId(), startPositionLedgerId);
+            Assert.assertEquals(pulsarSplit.getEndPositionLedgerId(), endPositionLedgerId);
+            Assert.assertEquals(pulsarSplit.getTupleDomain(), tupleDomain);
+            Assert.assertEquals(pulsarSplit.getOffloadPolicies(), offloadPolicies);
+        } catch (Exception e) {
+            log.error("Failed to deserialize the PulsarSplit.", e);
+            fail("Failed to deserialize the PulsarSplit.");
+        }
+
+    }
+
 }

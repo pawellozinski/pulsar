@@ -23,7 +23,6 @@ import java.io.File;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 
-import org.apache.pulsar.zookeeper.LocalBookkeeperEnsemble;
 import org.apache.zookeeper.server.NIOServerCnxnFactory;
 import org.apache.zookeeper.server.ZooKeeperServer;
 import org.slf4j.Logger;
@@ -81,6 +80,10 @@ public class ZookeeperServerTest implements Closeable {
 
     public int getZookeeperPort() {
         return serverFactory.getLocalPort();
+    }
+
+    public String getHostPort() {
+        return hostPort;
     }
 
     private static final Logger log = LoggerFactory.getLogger(ZookeeperServerTest.class);

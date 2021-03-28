@@ -20,7 +20,6 @@ package org.apache.pulsar.broker.service;
 
 import java.util.Optional;
 
-import org.apache.pulsar.broker.NoOpShutdownService;
 import org.apache.pulsar.broker.PulsarService;
 import org.apache.pulsar.broker.ServiceConfiguration;
 import org.apache.pulsar.client.admin.PulsarAdmin;
@@ -58,7 +57,11 @@ public abstract class BkEnsemblesTestBase {
         this.numberOfBookies = numberOfBookies;
     }
 
-    @BeforeMethod
+    protected void configurePulsar(ServiceConfiguration config) {
+        //overridable by subclasses
+    }
+
+    @BeforeMethod(groups = {"broker-impl", "broker"})
     protected void setup() throws Exception {
         try {
             // start local bookie and zookeeper
@@ -78,9 +81,10 @@ public abstract class BkEnsemblesTestBase {
             config.setManagedLedgerMinLedgerRolloverTimeMinutes(0);
             config.setAdvertisedAddress("127.0.0.1");
             config.setAllowAutoTopicCreationType("non-partitioned");
+            config.setZooKeeperOperationTimeoutSeconds(1);
+            configurePulsar(config);
 
             pulsar = new PulsarService(config);
-            pulsar.setShutdownService(new NoOpShutdownService());
             pulsar.start();
 
             admin = PulsarAdmin.builder().serviceHttpUrl(pulsar.getWebServiceAddress()).build();
@@ -94,15 +98,11 @@ public abstract class BkEnsemblesTestBase {
         }
     }
 
-    @AfterMethod
+    @AfterMethod(alwaysRun = true, groups = {"broker-impl", "broker"})
     protected void shutdown() throws Exception {
-        try {
-            admin.close();
-            pulsar.close();
-            bkEnsemble.stop();
-        } catch (Throwable t) {
-            log.warn("Error cleaning up broker test setup state", t);
-        }
+        admin.close();
+        pulsar.close();
+        bkEnsemble.stop();
     }
 
 }

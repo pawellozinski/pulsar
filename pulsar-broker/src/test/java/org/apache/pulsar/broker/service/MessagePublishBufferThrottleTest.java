@@ -18,20 +18,19 @@
  */
 package org.apache.pulsar.broker.service;
 
-import org.apache.pulsar.client.api.MessageId;
-import org.apache.pulsar.client.api.Producer;
-import org.apache.pulsar.common.util.FutureUtil;
-import org.testng.Assert;
-import org.testng.annotations.Test;
-
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
+import org.apache.pulsar.client.api.MessageId;
+import org.apache.pulsar.client.api.Producer;
+import org.apache.pulsar.common.util.FutureUtil;
+import org.awaitility.Awaitility;
+import org.testng.Assert;
+import org.testng.annotations.AfterMethod;
+import org.testng.annotations.Test;
 
-/**
- */
+@Test(groups = "broker")
 public class MessagePublishBufferThrottleTest extends BrokerTestBase {
 
     @Override
@@ -39,9 +38,11 @@ public class MessagePublishBufferThrottleTest extends BrokerTestBase {
         //No-op
     }
 
+    @AfterMethod(alwaysRun = true)
     @Override
     protected void cleanup() throws Exception {
-        //No-op
+        super.internalCleanup();
+        resetConfig();
     }
 
     @Test
@@ -51,12 +52,13 @@ public class MessagePublishBufferThrottleTest extends BrokerTestBase {
         super.baseSetup();
         final String topic = "persistent://prop/ns-abc/testMessagePublishBufferThrottleDisabled";
         Producer<byte[]> producer = pulsarClient.newProducer()
-            .topic(topic)
-            .producerName("producer-name")
-            .create();
+                .topic(topic)
+                .producerName("producer-name")
+                .create();
         Topic topicRef = pulsar.getBrokerService().getTopicReference(topic).get();
         Assert.assertNotNull(topicRef);
-        ((AbstractTopic)topicRef).producers.get("producer-name").getCnx().setMessagePublishBufferSize(Long.MAX_VALUE / 2);
+        TransportCnx cnx = ((AbstractTopic) topicRef).producers.get("producer-name").getCnx();
+        ((ServerCnx) cnx).setMessagePublishBufferSize(Long.MAX_VALUE / 2);
         Thread.sleep(20);
         Assert.assertFalse(pulsar.getBrokerService().isReachMessagePublishBufferThreshold());
         List<CompletableFuture<MessageId>> futures = new ArrayList<>();
@@ -70,40 +72,32 @@ public class MessagePublishBufferThrottleTest extends BrokerTestBase {
         }
         Thread.sleep(20);
         Assert.assertFalse(pulsar.getBrokerService().isReachMessagePublishBufferThreshold());
-        super.internalCleanup();
     }
 
     @Test
     public void testMessagePublishBufferThrottleEnable() throws Exception {
         conf.setMaxMessagePublishBufferSizeInMB(1);
-        conf.setMessagePublishBufferCheckIntervalInMillis(2);
+        conf.setMessagePublishBufferCheckIntervalInMillis(Integer.MAX_VALUE);
         super.baseSetup();
-        Thread.sleep(4);
         Assert.assertFalse(pulsar.getBrokerService().isReachMessagePublishBufferThreshold());
         final String topic = "persistent://prop/ns-abc/testMessagePublishBufferThrottleEnable";
         Producer<byte[]> producer = pulsarClient.newProducer()
-            .topic(topic)
-            .producerName("producer-name")
-            .create();
+                .topic(topic)
+                .producerName("producer-name")
+                .create();
         Topic topicRef = pulsar.getBrokerService().getTopicReference(topic).get();
         Assert.assertNotNull(topicRef);
-        ((AbstractTopic)topicRef).producers.get("producer-name").getCnx().setMessagePublishBufferSize(Long.MAX_VALUE / 2);
-        Thread.sleep(4);
-        Assert.assertTrue(pulsar.getBrokerService().isReachMessagePublishBufferThreshold());
+        TransportCnx cnx = ((AbstractTopic) topicRef).producers.get("producer-name").getCnx();
+        ((ServerCnx) cnx).setMessagePublishBufferSize(Long.MAX_VALUE / 2);
+        Assert.assertFalse(pulsar.getBrokerService().isReachMessagePublishBufferThreshold());
         // The first message can publish success, but the second message should be blocked
         producer.sendAsync(new byte[1024]).get(1, TimeUnit.SECONDS);
-        MessageId messageId = null;
-        try {
-            messageId = producer.sendAsync(new byte[1024]).get(1, TimeUnit.SECONDS);
-            Assert.fail("should failed, because producer blocked by publish buffer limiting");
-        } catch (TimeoutException e) {
-            // No-op
-        }
-        Assert.assertNull(messageId);
+        getPulsar().getBrokerService().checkMessagePublishBuffer();
+        Assert.assertTrue(pulsar.getBrokerService().isReachMessagePublishBufferThreshold());
 
-        ((AbstractTopic)topicRef).producers.get("producer-name").getCnx().setMessagePublishBufferSize(0L);
-        Thread.sleep(4);
-
+        ((ServerCnx) cnx).setMessagePublishBufferSize(0L);
+        getPulsar().getBrokerService().checkMessagePublishBuffer();
+        Assert.assertFalse(pulsar.getBrokerService().isReachMessagePublishBufferThreshold());
         List<CompletableFuture<MessageId>> futures = new ArrayList<>();
         // Make sure the producer can publish succeed.
         for (int i = 0; i < 10; i++) {
@@ -113,45 +107,43 @@ public class MessagePublishBufferThrottleTest extends BrokerTestBase {
         for (CompletableFuture<MessageId> future : futures) {
             Assert.assertNotNull(future.get());
         }
-        Thread.sleep(4);
-        Assert.assertEquals(pulsar.getBrokerService().getCurrentMessagePublishBufferSize(), 0L);
-        super.internalCleanup();
+        Awaitility.await().untilAsserted(
+                () -> Assert.assertEquals(pulsar.getBrokerService().getCurrentMessagePublishBufferSize(), 0L));
     }
 
     @Test
     public void testBlockByPublishRateLimiting() throws Exception {
         conf.setMaxMessagePublishBufferSizeInMB(1);
-        conf.setMessagePublishBufferCheckIntervalInMillis(2);
+        conf.setMessagePublishBufferCheckIntervalInMillis(Integer.MAX_VALUE);
         super.baseSetup();
-        Thread.sleep(4);
         Assert.assertFalse(pulsar.getBrokerService().isReachMessagePublishBufferThreshold());
-        final String topic = "persistent://prop/ns-abc/testMessagePublishBufferThrottleEnable";
+        final String topic = "persistent://prop/ns-abc/testBlockByPublishRateLimiting";
         Producer<byte[]> producer = pulsarClient.newProducer()
-            .topic(topic)
-            .producerName("producer-name")
-            .create();
+                .topic(topic)
+                .producerName("producer-name")
+                .create();
         Topic topicRef = pulsar.getBrokerService().getTopicReference(topic).get();
         Assert.assertNotNull(topicRef);
-        ((AbstractTopic)topicRef).producers.get("producer-name").getCnx().setMessagePublishBufferSize(Long.MAX_VALUE / 2);
+        TransportCnx cnx = ((AbstractTopic) topicRef).producers.get("producer-name").getCnx();
+        ((ServerCnx) cnx).setMessagePublishBufferSize(Long.MAX_VALUE / 2);
+        Assert.assertFalse(pulsar.getBrokerService().isReachMessagePublishBufferThreshold());
         producer.sendAsync(new byte[1024]).get(1, TimeUnit.SECONDS);
 
-        Thread.sleep(4);
-        ((AbstractTopic)topicRef).producers.get("producer-name").getCnx().setAutoReadDisabledRateLimiting(true);
-        ((AbstractTopic)topicRef).producers.get("producer-name").getCnx().setMessagePublishBufferSize(0);
-        Thread.sleep(4);
+        // Block by publish buffer.
+        getPulsar().getBrokerService().checkMessagePublishBuffer();
+        Assert.assertTrue(pulsar.getBrokerService().isReachMessagePublishBufferThreshold());
+
+        // Block by publish rate.
+        ((ServerCnx) cnx).setMessagePublishBufferSize(0L);
+        getPulsar().getBrokerService().checkMessagePublishBuffer();
+        ((ServerCnx) cnx).setAutoReadDisabledRateLimiting(true);
+        cnx.disableCnxAutoRead();
+        cnx.enableCnxAutoRead();
+
+        // Resume message publish.
+        ((ServerCnx) cnx).setAutoReadDisabledRateLimiting(false);
+        cnx.enableCnxAutoRead();
         Assert.assertFalse(pulsar.getBrokerService().isReachMessagePublishBufferThreshold());
-        MessageId messageId = null;
-        try {
-            messageId = producer.sendAsync(new byte[1024]).get(1, TimeUnit.SECONDS);
-            Assert.fail("should failed, because producer blocked by publish buffer limiting");
-        } catch (TimeoutException e) {
-            // No-op
-        }
-        Assert.assertNull(messageId);
-
-        ((AbstractTopic)topicRef).producers.get("producer-name").getCnx().setAutoReadDisabledRateLimiting(false);
-        ((AbstractTopic)topicRef).producers.get("producer-name").getCnx().enableCnxAutoRead();
-
         List<CompletableFuture<MessageId>> futures = new ArrayList<>();
         // Make sure the producer can publish succeed.
         for (int i = 0; i < 10; i++) {
@@ -161,8 +153,7 @@ public class MessagePublishBufferThrottleTest extends BrokerTestBase {
         for (CompletableFuture<MessageId> future : futures) {
             Assert.assertNotNull(future.get());
         }
-        Thread.sleep(4);
-        Assert.assertEquals(pulsar.getBrokerService().getCurrentMessagePublishBufferSize(), 0L);
-        super.internalCleanup();
+        Awaitility.await().untilAsserted(
+                () -> Assert.assertEquals(pulsar.getBrokerService().getCurrentMessagePublishBufferSize(), 0L));
     }
 }

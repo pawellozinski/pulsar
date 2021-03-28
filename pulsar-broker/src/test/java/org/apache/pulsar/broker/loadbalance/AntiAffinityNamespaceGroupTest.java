@@ -41,7 +41,6 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
 import org.apache.bookkeeper.util.ZkUtils;
-import org.apache.pulsar.broker.NoOpShutdownService;
 import org.apache.pulsar.broker.PulsarService;
 import org.apache.pulsar.broker.ServiceConfiguration;
 import org.apache.pulsar.broker.loadbalance.impl.LoadManagerShared;
@@ -69,6 +68,7 @@ import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
+@Test(groups = "broker")
 public class AntiAffinityNamespaceGroupTest {
     private LocalBookkeeperEnsemble bkEnsemble;
 
@@ -114,9 +114,10 @@ public class AntiAffinityNamespaceGroupTest {
         config1.setFailureDomainsEnabled(true);
         config1.setLoadBalancerEnabled(true);
         config1.setAdvertisedAddress("localhost");
+        // Don't want overloaded threshold to affect namespace placement
+        config1.setLoadBalancerBrokerOverloadedThresholdPercentage(400);
         createCluster(bkEnsemble.getZkClient(), config1);
         pulsar1 = new PulsarService(config1);
-        pulsar1.setShutdownService(new NoOpShutdownService());
         pulsar1.start();
 
         primaryHost = String.format("%s:%d", "localhost", pulsar1.getListenPortHTTP().get());
@@ -131,8 +132,10 @@ public class AntiAffinityNamespaceGroupTest {
         config2.setZookeeperServers("127.0.0.1" + ":" + bkEnsemble.getZookeeperPort());
         config2.setBrokerServicePort(Optional.of(0));
         config2.setFailureDomainsEnabled(true);
+        config2.setAdvertisedAddress("localhost");
+        // Don't want overloaded threshold to affect namespace placement
+        config2.setLoadBalancerBrokerOverloadedThresholdPercentage(400);
         pulsar2 = new PulsarService(config2);
-        pulsar2.setShutdownService(new NoOpShutdownService());
         pulsar2.start();
 
         secondaryHost = String.format("%s:%d", "localhost", pulsar2.getListenPortHTTP().get());
@@ -146,7 +149,7 @@ public class AntiAffinityNamespaceGroupTest {
         Thread.sleep(100);
     }
 
-    @AfterMethod
+    @AfterMethod(alwaysRun = true)
     void shutdown() throws Exception {
         executor.shutdown();
 
@@ -367,6 +370,13 @@ public class AntiAffinityNamespaceGroupTest {
 
     /**
      * It verifies anti-affinity with failure domain enabled with 2 brokers.
+     *
+     * Note: in this class's setup method, the LoadBalancerBrokerOverloadedThresholdPercentage
+     * is set to 400 to ensure that the overloaded logic doesn't affect the broker selection.
+     * Without that configuration, two namespaces in the same anti-affinity group could
+     * be placed on the same broker. The CPU usage can be over 100%, and if we run with more
+     * than 4 cores, it could conceivably be above 400%. If this test becomes flaky again,
+     * look at the logs to see if there is a mention of an overloaded broker.
      *
      * <pre>
      * 1. Register brokers to domain: domain-1: broker1 & domain-2: broker2

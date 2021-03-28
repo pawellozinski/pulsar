@@ -23,7 +23,6 @@ import static org.testng.Assert.assertNotEquals;
 import static org.testng.Assert.assertTrue;
 import static org.testng.Assert.fail;
 
-import java.net.MalformedURLException;
 import java.net.URL;
 import java.util.HashSet;
 import java.util.List;
@@ -40,7 +39,6 @@ import lombok.extern.slf4j.Slf4j;
 import org.apache.pulsar.broker.namespace.NamespaceService;
 import org.apache.pulsar.client.admin.PulsarAdmin;
 import org.apache.pulsar.client.admin.PulsarAdminException;
-import org.apache.pulsar.client.api.PulsarClientException;
 import org.apache.pulsar.common.policies.data.ClusterData;
 import org.apache.pulsar.common.policies.data.NamespaceOwnershipStatus;
 import org.apache.pulsar.common.policies.data.TenantInfo;
@@ -51,18 +49,24 @@ import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
 @Slf4j
+@Test(groups = "broker")
 public class SLAMonitoringTest {
     LocalBookkeeperEnsemble bkEnsemble;
 
-    ExecutorService executor = new ThreadPoolExecutor(5, 20, 30, TimeUnit.SECONDS, new LinkedBlockingQueue<Runnable>());
+    ExecutorService executor =
+            new ThreadPoolExecutor(5,
+                    20,
+                    30,
+                    TimeUnit.SECONDS,
+                    new LinkedBlockingQueue<>());
 
     private static final int BROKER_COUNT = 5;
-    private int[] brokerWebServicePorts = new int[BROKER_COUNT];
-    private int[] brokerNativeBrokerPorts = new int[BROKER_COUNT];
-    private URL[] brokerUrls = new URL[BROKER_COUNT];
-    private PulsarService[] pulsarServices = new PulsarService[BROKER_COUNT];
-    private PulsarAdmin[] pulsarAdmins = new PulsarAdmin[BROKER_COUNT];
-    private ServiceConfiguration[] configurations = new ServiceConfiguration[BROKER_COUNT];
+    private final int[] brokerWebServicePorts = new int[BROKER_COUNT];
+    private final int[] brokerNativeBrokerPorts = new int[BROKER_COUNT];
+    private final URL[] brokerUrls = new URL[BROKER_COUNT];
+    private final PulsarService[] pulsarServices = new PulsarService[BROKER_COUNT];
+    private final PulsarAdmin[] pulsarAdmins = new PulsarAdmin[BROKER_COUNT];
+    private final ServiceConfiguration[] configurations = new ServiceConfiguration[BROKER_COUNT];
 
     @BeforeClass
     void setup() throws Exception {
@@ -85,7 +89,6 @@ public class SLAMonitoringTest {
             configurations[i] = config;
 
             pulsarServices[i] = new PulsarService(config);
-            pulsarServices[i].setShutdownService(new NoOpShutdownService());
             pulsarServices[i].start();
 
             brokerWebServicePorts[i] = pulsarServices[i].getListenPortHTTP().get();
@@ -105,7 +108,7 @@ public class SLAMonitoringTest {
     }
 
     private void createTenant(PulsarAdmin pulsarAdmin)
-            throws PulsarClientException, MalformedURLException, PulsarAdminException {
+            throws PulsarAdminException {
         ClusterData clusterData = new ClusterData();
         clusterData.setServiceUrl(pulsarAdmin.getServiceUrl());
         pulsarAdmins[0].clusters().createCluster("my-cluster", clusterData);
@@ -119,7 +122,7 @@ public class SLAMonitoringTest {
         pulsarAdmin.tenants().createTenant("sla-monitor", adminConfig);
     }
 
-    @AfterClass
+    @AfterClass(alwaysRun = true)
     public void shutdown() throws Exception {
         log.info("--- Shutting down ---");
         executor.shutdown();
@@ -139,7 +142,7 @@ public class SLAMonitoringTest {
                 assertTrue(pulsarServices[0].getNamespaceService().registerSLANamespace());
             } catch (PulsarServerException e) {
                 e.printStackTrace();
-                log.error("Exception occured", e);
+                log.error("Exception occurred", e);
                 fail("SLA Namespace should have been owned by the broker, Exception.", e);
             }
         }
@@ -215,7 +218,6 @@ public class SLAMonitoringTest {
         // Check if the namespace is properly unloaded and reowned by the broker
         try {
             pulsarServices[crashIndex] = new PulsarService(configurations[crashIndex]);
-            pulsarServices[crashIndex].setShutdownService(new NoOpShutdownService());
             pulsarServices[crashIndex].start();
 
             // Port for the broker will have changed since it's dynamically allocated

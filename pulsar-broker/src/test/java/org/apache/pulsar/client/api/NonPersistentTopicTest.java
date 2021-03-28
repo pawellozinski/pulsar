@@ -23,6 +23,7 @@ import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertNotEquals;
 import static org.testng.Assert.assertNotNull;
 import static org.testng.Assert.assertNull;
+import static org.testng.Assert.assertThrows;
 import static org.testng.Assert.assertTrue;
 import static org.testng.Assert.fail;
 
@@ -41,7 +42,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
-import org.apache.pulsar.broker.NoOpShutdownService;
 import org.apache.pulsar.broker.PulsarService;
 import org.apache.pulsar.broker.ServiceConfiguration;
 import org.apache.pulsar.broker.loadbalance.LoadManager;
@@ -53,6 +53,8 @@ import org.apache.pulsar.broker.service.nonpersistent.NonPersistentReplicator;
 import org.apache.pulsar.broker.service.nonpersistent.NonPersistentTopic;
 import org.apache.pulsar.client.admin.PulsarAdmin;
 import org.apache.pulsar.client.impl.ConsumerImpl;
+import org.apache.pulsar.client.impl.MultiTopicsConsumerImpl;
+import org.apache.pulsar.client.impl.PartitionedProducerImpl;
 import org.apache.pulsar.client.impl.ProducerImpl;
 import org.apache.pulsar.common.naming.NamespaceBundle;
 import org.apache.pulsar.common.naming.TopicName;
@@ -71,6 +73,7 @@ import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
+@Test(groups = "broker-api")
 public class NonPersistentTopicTest extends ProducerConsumerBase {
     private static final Logger log = LoggerFactory.getLogger(NonPersistentTopicTest.class);
     private final String configClusterName = "r1";
@@ -93,10 +96,62 @@ public class NonPersistentTopicTest extends ProducerConsumerBase {
         super.producerBaseSetup();
     }
 
-    @AfterMethod
+    @AfterMethod(alwaysRun = true)
     @Override
     protected void cleanup() throws Exception {
         super.internalCleanup();
+    }
+
+    @Test(timeOut = 90000 /* 1.5mn */)
+    public void testNonPersistentPartitionsAreNotAutoCreatedWhenThePartitionedTopicDoesNotExist() throws Exception {
+        final boolean defaultAllowAutoTopicCreation = conf.isAllowAutoTopicCreation();
+        try {
+            // Given the auto topic creation is disabled
+            cleanup();
+            conf.setAllowAutoTopicCreation(false);
+            setup();
+
+            final String topicPartitionName = "non-persistent://public/default/issue-9173-partition-0";
+
+            // Then error when subscribe to a partition of a non-persistent topic that does not exist
+            assertThrows(PulsarClientException.TopicDoesNotExistException.class,
+                    () -> pulsarClient.newConsumer().topic(topicPartitionName).subscriptionName("sub-issue-9173").subscribe());
+
+            // Then error when produce to a partition of a non-persistent topic that does not exist
+            assertThrows(PulsarClientException.TopicDoesNotExistException.class,
+                    () -> pulsarClient.newProducer().topic(topicPartitionName).create());
+        } finally {
+            conf.setAllowAutoTopicCreation(defaultAllowAutoTopicCreation);
+        }
+    }
+
+    @Test(timeOut = 90000 /* 1.5mn */)
+    public void testAutoCreateNonPersistentPartitionsWhenThePartitionedTopicExists() throws Exception {
+        final boolean defaultAllowAutoTopicCreation = conf.isAllowAutoTopicCreation();
+        try {
+            // Given the auto topic creation is disabled
+            cleanup();
+            conf.setAllowAutoTopicCreation(false);
+            setup();
+
+            // Given the non-persistent partitioned topic exists
+            final String topic = "non-persistent://public/default/issue-9173";
+            admin.topics().createPartitionedTopic(topic, 3);
+
+            // When subscribe, then a sub-consumer is created for each partition which means the partitions are created
+            final MultiTopicsConsumerImpl<byte[]> consumer = (MultiTopicsConsumerImpl<byte[]>) pulsarClient.newConsumer()
+                    .topic(topic).subscriptionName("sub-issue-9173").subscribe();
+            assertEquals(consumer.getConsumers().size(), 3);
+
+            // When produce, a sub-producer is created for each partition which means the partitions are created
+            PartitionedProducerImpl<byte[]> producer = (PartitionedProducerImpl<byte[]>) pulsarClient.newProducer().topic(topic).create();
+            assertEquals(producer.getProducers().size(), 3);
+
+            consumer.close();
+            producer.close();
+        } finally {
+            conf.setAllowAutoTopicCreation(defaultAllowAutoTopicCreation);
+        }
     }
 
     @Test(dataProvider = "subscriptionType")
@@ -438,7 +493,7 @@ public class NonPersistentTopicTest extends ProducerConsumerBase {
         assertNotNull(topicRef);
 
         rolloverPerIntervalStats(pulsar);
-        stats = topicRef.getStats(false);
+        stats = topicRef.getStats(false, false);
         subStats = stats.getSubscriptions().values().iterator().next();
 
         // subscription stats
@@ -456,7 +511,7 @@ public class NonPersistentTopicTest extends ProducerConsumerBase {
         Thread.sleep(timeWaitToSync);
 
         rolloverPerIntervalStats(pulsar);
-        stats = topicRef.getStats(false);
+        stats = topicRef.getStats(false, false);
         subStats = stats.getSubscriptions().values().iterator().next();
 
         assertTrue(subStats.msgRateOut > 0);
@@ -520,7 +575,7 @@ public class NonPersistentTopicTest extends ProducerConsumerBase {
             assertNotNull(replicatorR3);
 
             rolloverPerIntervalStats(replicationPulasr);
-            stats = topicRef.getStats(false);
+            stats = topicRef.getStats(false, false);
             subStats = stats.getSubscriptions().values().iterator().next();
 
             // subscription stats
@@ -591,7 +646,7 @@ public class NonPersistentTopicTest extends ProducerConsumerBase {
             Thread.sleep(timeWaitToSync);
 
             rolloverPerIntervalStats(replicationPulasr);
-            stats = topicRef.getStats(false);
+            stats = topicRef.getStats(false, false);
             subStats = stats.getSubscriptions().values().iterator().next();
 
             assertTrue(subStats.msgRateOut > 0);
@@ -681,7 +736,6 @@ public class NonPersistentTopicTest extends ProducerConsumerBase {
     /**
      * verifies: broker should reject non-persistent topic loading if broker is not enable for non-persistent topic
      *
-     * @param loadManagerName
      * @throws Exception
      */
     @Test
@@ -795,7 +849,6 @@ public class NonPersistentTopicTest extends ProducerConsumerBase {
                 .enableBatching(false)
                 .messageRoutingMode(MessageRoutingMode.SinglePartition)
                 .create();
-            String firstTimeConnected = producer.getConnectedSince();
             ExecutorService executor = Executors.newFixedThreadPool(5);
             byte[] msgData = "testData".getBytes();
             final int totalProduceMessages = 200;
@@ -812,7 +865,7 @@ public class NonPersistentTopicTest extends ProducerConsumerBase {
 
             NonPersistentTopic topic = (NonPersistentTopic) pulsar.getBrokerService().getOrCreateTopic(topicName).get();
             pulsar.getBrokerService().updateRates();
-            NonPersistentTopicStats stats = topic.getStats(false);
+            NonPersistentTopicStats stats = topic.getStats(false, false);
             NonPersistentPublisherStats npStats = stats.getPublishers().get(0);
             NonPersistentSubscriptionStats sub1Stats = stats.getSubscriptions().get("subscriber-1");
             NonPersistentSubscriptionStats sub2Stats = stats.getSubscriptions().get("subscriber-2");
@@ -827,7 +880,6 @@ public class NonPersistentTopicTest extends ProducerConsumerBase {
         } finally {
             conf.setMaxConcurrentNonPersistentMessagePerConnection(defaultNonPersistentMessageRate);
         }
-
     }
 
     class ReplicationClusterManager {
@@ -893,7 +945,6 @@ public class NonPersistentTopicTest extends ProducerConsumerBase {
             config1.setBacklogQuotaCheckIntervalInSeconds(TIME_TO_CHECK_BACKLOG_QUOTA);
             config1.setAllowAutoTopicCreationType("non-partitioned");
             pulsar1 = new PulsarService(config1);
-            pulsar1.setShutdownService(new NoOpShutdownService());
             pulsar1.start();
             ns1 = pulsar1.getBrokerService();
 
@@ -919,7 +970,6 @@ public class NonPersistentTopicTest extends ProducerConsumerBase {
             config2.setBacklogQuotaCheckIntervalInSeconds(TIME_TO_CHECK_BACKLOG_QUOTA);
             config2.setAllowAutoTopicCreationType("non-partitioned");
             pulsar2 = new PulsarService(config2);
-            pulsar2.setShutdownService(new NoOpShutdownService());
             pulsar2.start();
             ns2 = pulsar2.getBrokerService();
 
@@ -944,7 +994,6 @@ public class NonPersistentTopicTest extends ProducerConsumerBase {
             config3.setBrokerServicePort(Optional.of(0));
             config3.setAllowAutoTopicCreationType("non-partitioned");
             pulsar3 = new PulsarService(config3);
-            pulsar3.setShutdownService(new NoOpShutdownService());
             pulsar3.start();
             ns3 = pulsar3.getBrokerService();
 
@@ -1003,7 +1052,6 @@ public class NonPersistentTopicTest extends ProducerConsumerBase {
             bkEnsemble3.stop();
             globalZkS.stop();
         }
-
     }
 
     private void rolloverPerIntervalStats(PulsarService pulsar) {

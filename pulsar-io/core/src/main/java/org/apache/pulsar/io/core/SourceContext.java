@@ -18,38 +18,20 @@
  */
 package org.apache.pulsar.io.core;
 
-import org.slf4j.Logger;
-
-import java.nio.ByteBuffer;
-import java.util.concurrent.CompletableFuture;
+import org.apache.pulsar.client.api.ConsumerBuilder;
+import org.apache.pulsar.client.api.PulsarClientException;
+import org.apache.pulsar.client.api.Schema;
+import org.apache.pulsar.client.api.TypedMessageBuilder;
+import org.apache.pulsar.common.classification.InterfaceAudience;
+import org.apache.pulsar.common.classification.InterfaceStability;
 
 /**
  * Interface for a source connector providing information about environment where it is running.
  * It also allows to propagate information, such as logs, metrics, states, back to the Pulsar environment.
  */
-public interface SourceContext {
-
-    /**
-     * The id of the instance that invokes this source.
-     *
-     * @return the instance id
-     */
-    int getInstanceId();
-
-    /**
-     * Get the number of instances that invoke this source.
-     *
-     * @return the number of instances that invoke this source.
-     */
-    int getNumInstances();
-
-    /**
-     * Record a user defined metric.
-     *
-     * @param metricName The name of the metric
-     * @param value The value of the metric
-     */
-    void recordMetric(String metricName, double value);
+@InterfaceAudience.Public
+@InterfaceStability.Stable
+public interface SourceContext extends ConnectorContext {
 
     /**
      * Get the output topic of the source.
@@ -59,20 +41,6 @@ public interface SourceContext {
     String getOutputTopic();
 
     /**
-     * The tenant this source belongs to.
-     *
-     * @return the tenant this source belongs to
-     */
-    String getTenant();
-
-    /**
-     * The namespace this source belongs to.
-     *
-     * @return the namespace this source belongs to
-     */
-    String getNamespace();
-
-    /**
      * The name of the source that we are executing.
      *
      * @return The Source name
@@ -80,84 +48,23 @@ public interface SourceContext {
     String getSourceName();
 
     /**
-     * The logger object that can be used to log in a source.
+     * New output message using schema for serializing to the topic
      *
-     * @return the logger object
+     * @param topicName The name of the topic for output message
+     * @param schema provide a way to convert between serialized data and domain objects
+     * @param <O>
+     * @return the message builder instance
+     * @throws PulsarClientException
      */
-    Logger getLogger();
+    <O> TypedMessageBuilder<O> newOutputMessage(String topicName, Schema<O> schema) throws PulsarClientException;
 
     /**
-     * Get the secret associated with this key.
+     * Create a ConsumerBuilder with the schema.
      *
-     * @param secretName The name of the secret
-     * @return The secret if anything was found or null
+     * @param schema provide a way to convert between serialized data and domain objects
+     * @param <O>
+     * @return the consumer builder instance
+     * @throws PulsarClientException
      */
-    String getSecret(String secretName);
-
-    /**
-     * Increment the builtin distributed counter referred by key.
-     *
-     * @param key    The name of the key
-     * @param amount The amount to be incremented
-     */
-    void incrCounter(String key, long amount);
-
-
-    /**
-     * Increment the builtin distributed counter referred by key
-     * but don't wait for the completion of the increment operation.
-     *
-     * @param key    The name of the key
-     * @param amount The amount to be incremented
-     */
-    CompletableFuture<Void> incrCounterAsync(String key, long amount);
-
-    /**
-     * Retrieve the counter value for the key.
-     *
-     * @param key name of the key
-     * @return the amount of the counter value for this key
-     */
-    long getCounter(String key);
-
-    /**
-     * Retrieve the counter value for the key, but don't wait
-     * for the operation to be completed.
-     *
-     * @param key name of the key
-     * @return the amount of the counter value for this key
-     */
-    CompletableFuture<Long> getCounterAsync(String key);
-
-    /**
-     * Update the state value for the key.
-     *
-     * @param key   name of the key
-     * @param value state value of the key
-     */
-    void putState(String key, ByteBuffer value);
-
-    /**
-     * Update the state value for the key, but don't wait for the operation to be completed.
-     *
-     * @param key   name of the key
-     * @param value state value of the key
-     */
-    CompletableFuture<Void> putStateAsync(String key, ByteBuffer value);
-
-    /**
-     * Retrieve the state value for the key.
-     *
-     * @param key name of the key
-     * @return the state value for the key.
-     */
-    ByteBuffer getState(String key);
-
-    /**
-     * Retrieve the state value for the key, but don't wait for the operation to be completed.
-     *
-     * @param key name of the key
-     * @return the state value for the key.
-     */
-    CompletableFuture<ByteBuffer> getStateAsync(String key);
+    <O> ConsumerBuilder<O> newConsumerBuilder(Schema<O> schema) throws PulsarClientException;
 }
